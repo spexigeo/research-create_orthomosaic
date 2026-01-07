@@ -1,0 +1,38 @@
+
+# Input and output directories
+inputs/
+outputs/
+outputs_*/
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# OS files
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Log files
+*.log
+run_log*.txt
+
+# Large data files (should not be in git)
+# Exclude large JSON files from outputs, but keep small config files
+outputs/**/*.json
+outputs_*/**/*.json
+features_*.json
+matches_*.json
+tracks_*.json
+point_cloud_*.json
+statistics_*.json
+camera_poses.json
+footprint_overlaps.json
+cell_analysis.json
+central_cell_info.json
+performance_summary_*.json
+tiepoints_*.json
