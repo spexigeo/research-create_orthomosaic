@@ -15,7 +15,7 @@ def visualize_track(track_id: int, num_images: int = 5,
                     features_file: str = "outputs/features_cache_cell_8928d89ac57ffff.json",
                     matches_file: str = "outputs/matches_cache_cell_8928d89ac57ffff.json",
                     image_dir: str = "inputs/quarter_resolution_images",
-                    output_dir: str = "outputs/visualization",
+                    output_dir: str = "outputs/visualize_single_track",
                     verify_matches: bool = True):
     """
     Visualize a track by showing feature locations on the first N images.
@@ -121,9 +121,13 @@ def visualize_track(track_id: int, num_images: int = 5,
             print(f"Warning: Unexpected feature format: {feature_info}")
             continue
         
-        # Get original image name (remove "quarter_" prefix if present)
-        original_img_name = img_name.replace("quarter_", "")
-        img_path = image_dir_path / original_img_name
+        # Get image name - keep "quarter_" prefix if present (images are stored with this prefix)
+        # Try with quarter_ prefix first, then without
+        img_path = image_dir_path / img_name
+        original_img_name = img_name.replace("quarter_", "")  # For display purposes
+        if not img_path.exists():
+            # Try without quarter_ prefix
+            img_path = image_dir_path / original_img_name
         
         if not img_path.exists():
             print(f"Warning: Image not found: {img_path}")
@@ -162,17 +166,13 @@ def visualize_track(track_id: int, num_images: int = 5,
             keypoints = np.array(feat_data['keypoints'])
             
             if feat_idx < len(keypoints):
-                # Get quarter-res coordinates
-                kpt_quarter = keypoints[feat_idx]
-                
-                # Scale up to original resolution (quarter resolution = 0.25 scale)
-                kpt_original = kpt_quarter * 4.0
+                # Get feature coordinates (already in quarter-resolution since features were extracted from quarter-res images)
+                kpt = keypoints[feat_idx]
                 
                 print(f"Image {idx+1}: {original_img_name}")
                 print(f"  Cache key used: {cache_key}")
                 print(f"  Feature index: {feat_idx}")
-                print(f"  Quarter-res coords: ({kpt_quarter[0]:.1f}, {kpt_quarter[1]:.1f})")
-                print(f"  Original coords: ({kpt_original[0]:.1f}, {kpt_original[1]:.1f})")
+                print(f"  Feature coords: ({kpt[0]:.1f}, {kpt[1]:.1f})")
                 print(f"  Image size: {img_rgb.shape[1]}x{img_rgb.shape[0]}")
                 
                 # Verify match with previous image if available
@@ -209,20 +209,20 @@ def visualize_track(track_id: int, num_images: int = 5,
                         is_direct_match = (prev_feat_idx in match_dict and match_dict[prev_feat_idx] == feat_idx)
                 
                 # Set title with match status
-                match_status = "✓ Direct match" if is_direct_match else "⚠ Indirect path"
-                axes[idx].set_title(f"{original_img_name}\nFeature {feat_idx} at ({kpt_original[0]:.0f}, {kpt_original[1]:.0f})\n{match_status}", 
+                match_status = "✓ Match verified" if is_direct_match else "⚠ Match not found in matches file"
+                axes[idx].set_title(f"{original_img_name}\nFeature {feat_idx} at ({kpt[0]:.0f}, {kpt[1]:.0f})\n{match_status}", 
                                    fontsize=9, color='green' if is_direct_match else 'orange')
                 
                 # Draw big red dot at feature location
                 # Note: matplotlib imshow uses (0,0) at top-left, x increases right, y increases down
-                # So coordinates are already in the correct format
+                # Features are in quarter-resolution coordinates, matching the quarter-resolution images
                 color = 'red' if is_direct_match else 'orange'
-                axes[idx].plot(kpt_original[0], kpt_original[1], 'o', color=color,
+                axes[idx].plot(kpt[0], kpt[1], 'o', color=color,
                               markersize=30, markeredgecolor='darkred' if is_direct_match else 'darkorange', 
                               markeredgewidth=3, alpha=0.8, label='Feature')
                 # Also draw a circle for better visibility
                 from matplotlib.patches import Circle
-                circle = Circle((kpt_original[0], kpt_original[1]), radius=50, 
+                circle = Circle((kpt[0], kpt[1]), radius=50, 
                               color=color, fill=False, linewidth=3, alpha=0.8)
                 axes[idx].add_patch(circle)
             else:

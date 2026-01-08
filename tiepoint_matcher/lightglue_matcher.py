@@ -136,33 +136,30 @@ class LightGlueMatcher:
             Dictionary with keys: 'matches', 'match_confidence'
         """
         # Ensure tensors are available and are actually tensors
+        # If tensors are missing, re-extract features (this applies max_features_per_image limit)
         if 'keypoints_tensor' not in feats0 or not isinstance(feats0['keypoints_tensor'], torch.Tensor):
-            # Re-extract if tensors are missing or wrong type
-            if self.extractor_type == 'superpoint':
-                pil_image0 = Image.open(feats0['image_path']).convert('L')
-                image0 = TF.to_tensor(pil_image0).unsqueeze(0).to(self.device)
-            else:
-                image0 = load_image(feats0['image_path']).to(self.device)
-            with torch.no_grad():
-                feats0_tensor = self.extractor({'image': image0})
-            feats0['keypoints_tensor'] = feats0_tensor['keypoints']
-            feats0['descriptors_tensor'] = feats0_tensor['descriptors']
-            feats0['scores_tensor'] = feats0_tensor['keypoint_scores']
-            feats0['image_tensor'] = image0
+            # Re-extract using extract_features to ensure max_features_per_image is applied
+            feats0_full = self.extract_features(feats0['image_path'])
+            feats0['keypoints_tensor'] = feats0_full['keypoints_tensor']
+            feats0['descriptors_tensor'] = feats0_full['descriptors_tensor']
+            feats0['scores_tensor'] = feats0_full['scores_tensor']
+            feats0['image_tensor'] = feats0_full['image_tensor']
+            # Update numpy arrays to match filtered tensors
+            feats0['keypoints'] = feats0_full['keypoints']
+            feats0['scores'] = feats0_full['scores']
+            feats0['descriptors'] = feats0_full['descriptors']
         
         if 'keypoints_tensor' not in feats1 or not isinstance(feats1['keypoints_tensor'], torch.Tensor):
-            # Re-extract if tensors are missing or wrong type
-            if self.extractor_type == 'superpoint':
-                pil_image1 = Image.open(feats1['image_path']).convert('L')
-                image1 = TF.to_tensor(pil_image1).unsqueeze(0).to(self.device)
-            else:
-                image1 = load_image(feats1['image_path']).to(self.device)
-            with torch.no_grad():
-                feats1_tensor = self.extractor({'image': image1})
-            feats1['keypoints_tensor'] = feats1_tensor['keypoints']
-            feats1['descriptors_tensor'] = feats1_tensor['descriptors']
-            feats1['scores_tensor'] = feats1_tensor['keypoint_scores']
-            feats1['image_tensor'] = image1
+            # Re-extract using extract_features to ensure max_features_per_image is applied
+            feats1_full = self.extract_features(feats1['image_path'])
+            feats1['keypoints_tensor'] = feats1_full['keypoints_tensor']
+            feats1['descriptors_tensor'] = feats1_full['descriptors_tensor']
+            feats1['scores_tensor'] = feats1_full['scores_tensor']
+            feats1['image_tensor'] = feats1_full['image_tensor']
+            # Update numpy arrays to match filtered tensors
+            feats1['keypoints'] = feats1_full['keypoints']
+            feats1['scores'] = feats1_full['scores']
+            feats1['descriptors'] = feats1_full['descriptors']
         
         # Ensure tensors are on the correct device
         feats0['keypoints_tensor'] = feats0['keypoints_tensor'].to(self.device)
@@ -250,9 +247,15 @@ class LightGlueMatcher:
         else:
             match_confidence = np.array([])
         
-        # Filter valid matches (indices >= 0)
+        # Filter valid matches (indices >= 0 and within feature count bounds)
         if len(matches) > 0:
-            valid = matches[:, 0] >= 0
+            # Get actual feature counts from tensors
+            num_feats0 = feats0['keypoints_tensor'].shape[1]  # [1, N, 2] -> N
+            num_feats1 = feats1['keypoints_tensor'].shape[1]  # [1, N, 2] -> N
+            
+            # Filter matches: indices must be >= 0 and < num_features
+            valid = (matches[:, 0] >= 0) & (matches[:, 0] < num_feats0) & \
+                    (matches[:, 1] >= 0) & (matches[:, 1] < num_feats1)
             matches = matches[valid]
             # Only filter confidence if it has the same length
             if len(match_confidence) > 0 and len(match_confidence) == len(valid):

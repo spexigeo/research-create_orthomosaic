@@ -35,7 +35,7 @@ from tiepoint_matcher.track_analysis import (
 from tiepoint_matcher.point_cloud_reconstruction import reconstruct_point_cloud
 from tiepoint_matcher.robust_reconstruction import robust_reconstruct_with_bundle_adjustment
 from tiepoint_matcher.ply_export import export_point_cloud_to_ply
-from scanline_matching import ScanlineMatcher, load_scanlines_from_analysis, parse_image_number
+from scanline_matching import parse_image_number
 from tqdm import tqdm
 
 
@@ -139,7 +139,8 @@ def main(min_overlap_threshold: float = 50.0):
     cell_images = cell_to_images[central_cell]
     print(f"   Found {len(cell_images)} images in cell {central_cell}")
     
-    # Step 3.5: Extract camera poses FIRST (needed for footprint overlap computation)
+    # Step 3.5: Extract camera poses FIRST (REQUIRED before footprint overlap computation)
+    # This MUST happen before Step 3.6 (compute_footprint_overlap) and Step 5.5 (matching)
     print("\n3.5. Extracting camera poses from images...")
     camera_poses_file = output_dir / "camera_poses.json"
     
@@ -163,10 +164,18 @@ def main(min_overlap_threshold: float = 50.0):
     else:
         print(f"   Camera poses file already exists: {camera_poses_file}")
     
-    # Step 3.6: Compute footprint overlaps (needed for matching)
+    # Step 3.6: Compute footprint overlaps (REQUIRED before matching)
+    # This MUST happen after Step 3.5 (extract_camera_poses) and before Step 5.5 (matching)
     print("\n3.6. Computing footprint overlaps...")
     from compute_footprint_overlap import compute_all_overlaps
     footprint_overlaps_file = output_dir / "footprint_overlaps.json"
+    
+    # Verify camera_poses.json exists (required for footprint overlap computation)
+    if not camera_poses_file.exists():
+        raise FileNotFoundError(
+            f"Camera poses file not found: {camera_poses_file}\n"
+            f"  Step 3.5 (extract_camera_poses) must complete before Step 3.6 (compute_footprint_overlap)."
+        )
     
     if not footprint_overlaps_file.exists():
         print(f"   Computing footprint overlaps (will filter pairs with < {min_overlap_threshold}% overlap)...")
@@ -253,7 +262,9 @@ def main(min_overlap_threshold: float = 50.0):
                             'keypoints': keypoints[top_indices],
                             'scores': scores[top_indices],
                             'descriptors': descriptors[top_indices] if len(descriptors) > 0 else [],
-                            'image_path': feat_data.get('image_path', img_path)
+                            'image_path': feat_data.get('image_path', img_path),
+                            # Note: tensor versions will be recreated in match_features if needed
+                            # but match indices will be relative to the filtered feature set (0 to max_features-1)
                         }
                     else:
                         filtered_features[img_path] = feat_data
@@ -306,19 +317,31 @@ def main(min_overlap_threshold: float = 50.0):
             'matches': []  # Will be computed in matching step
         }
     
-    # Step 5.4: Compute footprint overlaps BEFORE matching
-    # This must happen AFTER camera poses are extracted (which happens later in the script)
-    # So we'll compute it right before matching, after camera_poses.json is created
-    
     # Step 5.5: Match features (with caching)
+    # NOTE: Camera poses (Step 3.5) and footprint overlaps (Step 3.6) MUST be computed BEFORE matching
     print("\n5.5. Matching features across image pairs...")
+    
+    # Verify that required files exist before matching
+    camera_poses_file = output_dir / "camera_poses.json"
+    footprint_overlaps_file = output_dir / "footprint_overlaps.json"
+    
+    if not camera_poses_file.exists():
+        raise FileNotFoundError(
+            f"Camera poses file not found: {camera_poses_file}\n"
+            f"  Camera poses must be extracted (Step 3.5) before matching can proceed."
+        )
+    
+    if not footprint_overlaps_file.exists():
+        raise FileNotFoundError(
+            f"Footprint overlaps file not found: {footprint_overlaps_file}\n"
+            f"  Footprint overlaps must be computed (Step 3.6) before matching can proceed."
+        )
     
     # Check for cached matches
     matches_cache_path = output_dir / f"matches_cache_cell_{central_cell}.json"
     use_matches_cache = matches_cache_path.exists()
     
-    # Use scanline-based matching - will select high-priority pairs
-    # For debugging: match ALL pairs with sufficient overlap (no limit)
+    # Match all pairs with sufficient footprint overlap
     max_pairs = None  # None = match all pairs that pass overlap filter
     
     if use_matches_cache and len(match_results['matches']) == 0:
@@ -335,8 +358,7 @@ def main(min_overlap_threshold: float = 50.0):
     
     if not use_matches_cache or len(match_results['matches']) == 0:
         # Need to do matching
-        # Load footprint overlaps to filter pairs (should already be computed in Step 3.6)
-        footprint_overlaps_file = output_dir / "footprint_overlaps.json"
+        # Load footprint overlaps to filter pairs (already computed in Step 3.6)
         print(f"   Loading footprint overlaps (minimum threshold: {min_overlap_threshold}%)...")
         footprint_overlaps = load_footprint_overlaps(
             overlaps_file=str(footprint_overlaps_file),
@@ -345,19 +367,12 @@ def main(min_overlap_threshold: float = 50.0):
         if footprint_overlaps:
             print(f"   Footprint overlap filtering ENABLED - will match only pairs with >= {min_overlap_threshold}% overlap")
         else:
-            raise ValueError(f"No footprint overlaps found! Check {footprint_overlaps_file}. Make sure Step 3.6 completed successfully.")
+            raise ValueError(
+                f"No footprint overlaps found! Check {footprint_overlaps_file}.\n"
+                f"  Make sure Step 3.6 (compute_footprint_overlap) completed successfully."
+            )
         
-        # Load scanlines for intelligent matching (DISABLED FOR DEBUGGING)
-        print("   Loading scanline information for improved matching...")
-        try:
-            scanlines = load_scanlines_from_analysis()
-            scanline_matcher = ScanlineMatcher(scanlines)
-            print(f"   Loaded {len(scanlines)} scanlines")
-            print("   Note: Scanline filtering DISABLED for debugging - matching all pairs that pass overlap filter")
-            scanline_matcher = None  # Disable scanline filtering temporarily
-        except Exception as e:
-            print(f"   Warning: Could not load scanlines: {e}, using default matching")
-            scanline_matcher = None
+        # Scanline analysis no longer used - footprint overlap filtering is more robust
         
         # Count pairs that actually pass the overlap filter
         if footprint_overlaps:
@@ -402,17 +417,11 @@ def main(min_overlap_threshold: float = 50.0):
                     # No overlaps loaded, match all pairs
                     overlap_pct = 100.0
                 
-                # Extract image numbers
-                img0_num = parse_image_number(img0_name)
-                img1_num = parse_image_number(img1_name)
-                
-                # For debugging: match all pairs (no scanline filtering)
-                # Just add all pairs with default priority
-                pairs_with_priority.append((i, j, 5, img0_path, img1_path))
+                # Add all pairs with sufficient overlap
+                pairs_with_priority.append((i, j, img0_path, img1_path))
         
-        # For debugging: match all pairs (no sorting or limiting)
-        # Sort by priority (lower = better) - but we're matching all pairs anyway
-        pairs_with_priority.sort(key=lambda x: x[2])
+        # Sort pairs (for consistency, though we're matching all pairs)
+        pairs_with_priority.sort()
         
         # Select top priority pairs up to max_pairs (None = all pairs)
         if max_pairs:
@@ -423,7 +432,7 @@ def main(min_overlap_threshold: float = 50.0):
         else:
             print(f"   WARNING: No footprint overlaps loaded - selected {len(pairs_with_priority)} pairs (ALL pairs, no filtering)")
         
-        pairs = [(i, j) for i, j, _, _, _ in pairs_with_priority]
+        pairs = [(i, j) for i, j, _, _ in pairs_with_priority]
         
         # Parallel matching function
         def match_pair(args):
@@ -450,8 +459,14 @@ def main(min_overlap_threshold: float = 50.0):
         
         # Prepare arguments for parallel processing
         import os
-        num_workers = min(os.cpu_count() or 4, len(pairs), 8)  # Limit to 8 workers max to avoid memory issues
-        print(f"   Using {num_workers} parallel workers for matching...")
+        import torch
+        # MPS (Metal) on macOS has issues with threading - use fewer workers or sequential
+        if torch.backends.mps.is_available():
+            num_workers = 1  # MPS doesn't work well with threading
+            print(f"   Using sequential matching (MPS device detected - threading disabled)")
+        else:
+            num_workers = min(os.cpu_count() or 4, len(pairs), 4)  # Limit to 4 workers max
+            print(f"   Using {num_workers} parallel workers for matching...")
         
         match_args = [
             (i, j, image_list[i], image_list[j], 

@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
-from visualize_track import visualize_track
+from visualize_single_track import visualize_track
 
 
 def create_multiple_track_visualizations(
@@ -15,7 +15,7 @@ def create_multiple_track_visualizations(
     matches_file: str = "outputs/matches_unfiltered_cell_8928d89ac57ffff.json",
     image_dir: str = "inputs/quarter_resolution_images",
     output_dir: str = "outputs/visualization",
-    num_tracks: int = 10
+    num_tracks: int = 20
 ):
     """
     Create visualizations for multiple tracks of different lengths.
@@ -74,21 +74,28 @@ def create_multiple_track_visualizations(
                 tracks_to_visualize.append(track)
                 print(f"Selected long track (length {track.get('length', 0)}): {track.get('track_id', 'unknown')}")
     
-    # Fill up to num_tracks with random tracks
+    # Fill up to num_tracks with random tracks of different lengths
     import random
-    while len(tracks_to_visualize) < num_tracks and len(tracks_to_visualize) < len(tracks):
+    random.seed(42)  # For reproducibility
+    
+    # Get tracks by length that we haven't selected yet
+    available_lengths = sorted([l for l in tracks_by_length.keys() if l not in [2, 3, 4, 5]])
+    
+    # Select random tracks from different lengths
+    for length in available_lengths:
+        if len(tracks_to_visualize) >= num_tracks:
+            break
+        available_tracks = [t for t in tracks_by_length[length] if t not in tracks_to_visualize]
+        if available_tracks:
+            tracks_to_visualize.append(random.choice(available_tracks))
+    
+    # If we still need more, fill with completely random tracks
+    while len(tracks_to_visualize) < num_tracks:
         remaining = [t for t in tracks if t not in tracks_to_visualize]
         if remaining:
             tracks_to_visualize.append(random.choice(remaining))
         else:
             break
-    
-    # If we still need more, just take random tracks
-    if len(tracks_to_visualize) < num_tracks:
-        random.shuffle(tracks)
-        for track in tracks:
-            if track not in tracks_to_visualize and len(tracks_to_visualize) < num_tracks:
-                tracks_to_visualize.append(track)
     
     print(f"\nCreating visualizations for {len(tracks_to_visualize)} tracks...")
     
