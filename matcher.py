@@ -13,7 +13,7 @@ except ImportError:
 import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-from tiepoint_matcher import (
+from matcher import (
     find_central_cell,
     get_cell_images,
     LightGlueMatcher,
@@ -21,21 +21,20 @@ from tiepoint_matcher import (
     visualize_features_and_matches,
     visualize_feature_distribution
 )
-from tiepoint_matcher.image_utils import (
+from matcher.image_utils import (
     downsample_images_batch,
     save_feature_coordinates,
     load_feature_coordinates,
     save_features_full,
     load_features_full
 )
-from tiepoint_matcher.track_analysis import (
+from matcher.track_analysis import (
     compute_tracks,
     plot_track_length_histogram
 )
-from tiepoint_matcher.point_cloud_reconstruction import reconstruct_point_cloud
-from tiepoint_matcher.robust_reconstruction import robust_reconstruct_with_bundle_adjustment
-from tiepoint_matcher.ply_export import export_point_cloud_to_ply
-from scanline_matching import parse_image_number
+from matcher.point_cloud_reconstruction import reconstruct_point_cloud
+from matcher.robust_reconstruction import robust_reconstruct_with_bundle_adjustment
+from matcher.ply_export import export_point_cloud_to_ply
 from tqdm import tqdm
 
 
@@ -146,7 +145,7 @@ def main(min_overlap_threshold: float = 50.0):
     
     if not camera_poses_file.exists():
         print("   Camera poses file not found, extracting from images...")
-        from extract_camera_poses import extract_camera_pose
+        from matcher.cameras import extract_camera_pose
         
         camera_poses = []
         for img_path in tqdm(cell_images, desc="Extracting camera poses"):
@@ -167,7 +166,7 @@ def main(min_overlap_threshold: float = 50.0):
     # Step 3.6: Compute footprint overlaps (REQUIRED before matching)
     # This MUST happen after Step 3.5 (extract_camera_poses) and before Step 5.5 (matching)
     print("\n3.6. Computing footprint overlaps...")
-    from compute_footprint_overlap import compute_all_overlaps
+    from matcher.utils import compute_all_overlaps
     footprint_overlaps_file = output_dir / "footprint_overlaps.json"
     
     # Verify camera_poses.json exists (required for footprint overlap computation)
@@ -211,7 +210,7 @@ def main(min_overlap_threshold: float = 50.0):
     
     # Step 4: Initialize matcher
     print("\n4. Initializing LightGlue matcher...")
-    max_features = 100  # Reduced from 500 to save memory
+    max_features = 200  # Top features per image for matching
     matcher = LightGlueMatcher(extractor_type='superpoint', device=None, 
                                max_features_per_image=max_features)
     print(f"   Using device: {matcher.device}")
@@ -613,7 +612,7 @@ def main(min_overlap_threshold: float = 50.0):
     
     # Visualization 2.5: Overlap counts per image
     print("\n   Creating overlap counts visualization...")
-    from visualize_overlap_counts import visualize_overlap_counts
+    from matcher.visualization import visualize_overlap_counts
     overlap_counts_output = output_dir / f"overlap_counts_per_image.png"
     visualize_overlap_counts(
         overlaps_file=str(output_dir / "footprint_overlaps.json"),
@@ -674,7 +673,7 @@ def main(min_overlap_threshold: float = 50.0):
     
     # Create track visualizations for 5 random tracks
     print("\n   Creating track visualizations...")
-    from create_track_visualizations import create_multiple_track_visualizations
+    from matcher.visualization import create_multiple_track_visualizations
     create_multiple_track_visualizations(
         tracks_file=str(tracks_output),
         features_file=str(features_cache_path),

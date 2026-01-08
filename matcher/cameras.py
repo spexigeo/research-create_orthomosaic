@@ -1,104 +1,250 @@
 """
-Export camera poses to PLY format for 3D visualization.
-Creates spheres for camera centers and arrows/lines for camera orientations.
+Extract camera pose information from image EXIF metadata and export to PLY format.
 """
-
 import json
 import math
-import numpy as np
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
-
-# Import footprint calculation from the inputs module
+from PIL import Image
+from PIL.ExifTags import TAGS, GPSTAGS
+import numpy as np
+from typing import Dict, List, Optional, Tuple
 import sys
-# Try multiple possible paths for the inputs directory
-possible_paths = [
-    Path(__file__).parent / 'inputs',  # ./inputs (same directory as script)
-    Path(__file__).parent.parent / 'inputs',  # ../inputs
-    Path('/Users/mauriciohessflores/Documents/Code/MyCode/research-create_orthomosaic/inputs'),  # Absolute
-]
-FOOTPRINT_AVAILABLE = False
-Footprint = None
-for inputs_path in possible_paths:
-    if inputs_path.exists() and (inputs_path / 'main.py').exists():
-        sys.path.insert(0, str(inputs_path))
+
+
+def get_decimal_from_dms(dms, ref):
+    """Convert degrees, minutes, seconds to decimal degrees."""
+    degrees = dms[0]
+    minutes = dms[1] / 60.0
+    seconds = dms[2] / 3600.0
+    
+    if ref in ['S', 'W']:
+        return -(degrees + minutes + seconds)
+    return degrees + minutes + seconds
+
+
+def extract_gps_coordinates(exif_data) -> Optional[Tuple[float, float, float]]:
+    """Extract GPS coordinates (lat, lon, altitude) from EXIF data."""
+    if 34853 not in exif_data:  # GPSInfo tag
+        return None
+    
+    gps_info = exif_data[34853]
+    
+    # GPS info might be stored as a dict or as a reference
+    # Try to convert to dict if needed
+    if not isinstance(gps_info, dict):
+        # Sometimes it's stored as a reference - try to get the actual data
         try:
-            from main import Footprint
-            FOOTPRINT_AVAILABLE = True
-            break
-        except ImportError as e:
-            continue
-
-if not FOOTPRINT_AVAILABLE:
-    print("Warning: Could not import Footprint class from inputs/main.py. Using fallback method.")
-
-
-def create_sphere(center: np.ndarray, radius: float, num_segments: int = 8) -> Tuple[np.ndarray, List[List[int]]]:
-    """
-    Create a sphere mesh for PLY export.
+            # Access via _get_ifd method if available
+            if hasattr(exif_data, '_get_ifd'):
+                gps_info = exif_data._get_ifd(34853)
+            else:
+                return None
+        except:
+            return None
     
-    Args:
-        center: Center point (3D)
-        radius: Sphere radius
-        num_segments: Number of segments for sphere approximation
+    if not isinstance(gps_info, dict):
+        return None
+    
+    # Get latitude
+    if 2 not in gps_info or 1 not in gps_info:  # GPSLatitude and GPSLatitudeRef
+        return None
+    
+    lat_dms = gps_info[2]
+    lat_ref = gps_info[1]
+    lat = get_decimal_from_dms(lat_dms, lat_ref)
+    
+    # Get longitude
+    if 4 not in gps_info or 3 not in gps_info:  # GPSLongitude and GPSLongitudeRef
+        return None
+    
+    lon_dms = gps_info[4]
+    lon_ref = gps_info[3]
+    lon = get_decimal_from_dms(lon_dms, lon_ref)
+    
+    # Get altitude
+    altitude = None
+    if 6 in gps_info:  # GPSAltitude
+        altitude = float(gps_info[6])
+        if 5 in gps_info and gps_info[5] == 1:  # GPSAltitudeRef (1 = below sea level)
+            altitude = -altitude
+    
+    return (lat, lon, altitude if altitude is not None else 0.0)
+
+
+def extract_orientation(exif_data) -> Optional[Dict[str, float]]:
+    """Extract camera orientation from EXIF data."""
+    orientation = {}
+    
+    # Try to get orientation from various EXIF tags
+    # These tags may vary by camera manufacturer
+    
+    # Common orientation tags
+    orientation_tags = {
+        'CameraRoll': (0x9206,),  # Orientation
+        'CameraPitch': None,  # May not be in standard EXIF
+        'CameraYaw': None,   # May not be in standard EXIF
+    }
+    
+    # Check for orientation (rotation)
+    if 274 in exif_data:  # Orientation tag
+        orientation['image_orientation'] = exif_data[274]
+    
+    # Check for custom tags that might contain pose info
+    # Some drones store this in custom tags
+    for tag_id, value in exif_data.items():
+        tag_name = TAGS.get(tag_id, f'Unknown_{tag_id}')
+        if isinstance(tag_name, str) and any(keyword in tag_name.lower() for keyword in ['yaw', 'pitch', 'roll', 'gimbal', 'attitude', 'orientation']):
+            orientation[tag_name] = value
+    
+    return orientation if orientation else None
+
+
+def extract_camera_pose(image_path: str) -> Dict:
+    """
+    Extract camera pose information from image EXIF metadata.
     
     Returns:
-        vertices: Array of vertices (N, 3)
-        faces: List of face indices (triangles)
+        Dictionary with pose information:
+        - image_path: Path to image
+        - gps: (lat, lon, altitude) tuple if available
+        - orientation: Dictionary with orientation info if available
+        - exif_tags: All relevant EXIF tags
     """
-    vertices = []
-    faces = []
+    result = {
+        'image_path': str(image_path),
+        'image_name': Path(image_path).name,
+        'gps': None,
+        'orientation': None,
+        'exif_available': False
+    }
     
-    # Create sphere using spherical coordinates
-    phi_step = np.pi / num_segments
-    theta_step = 2 * np.pi / num_segments
+    try:
+        img = Image.open(image_path)
+        # Use _getexif() for better GPS support
+        exif = img._getexif() if hasattr(img, '_getexif') else img.getexif()
+        
+        if not exif:
+            return result
+        
+        result['exif_available'] = True
+        
+        # Extract GPS coordinates
+        gps = extract_gps_coordinates(exif)
+        if gps:
+            result['gps'] = {
+                'latitude': gps[0],
+                'longitude': gps[1],
+                'altitude': gps[2]
+            }
+        
+        # Extract orientation (basic EXIF)
+        orientation = extract_orientation(exif)
+        if orientation:
+            result['orientation'] = orientation
+        
+        # Try to extract DJI-specific orientation using exifread/exiftool
+        try:
+            from .dji_exif_parser import extract_dji_orientation
+            dji_orientation = extract_dji_orientation(str(image_path))
+            if dji_orientation:
+                result['dji_orientation'] = dji_orientation
+        except Exception:
+            pass  # DJI orientation extraction is optional
+        
+        # Store some useful EXIF tags
+        useful_tags = {}
+        for tag_id, value in exif.items():
+            tag_name = TAGS.get(tag_id, f'Tag_{tag_id}')
+            # Store datetime, camera model, etc.
+            if tag_name in ['DateTime', 'DateTimeOriginal', 'Make', 'Model', 'Software']:
+                useful_tags[tag_name] = str(value)
+        
+        result['exif_tags'] = useful_tags
+        
+    except Exception as e:
+        result['error'] = str(e)
     
-    vertex_offset = len(vertices)
-    
-    # Generate vertices
-    for i in range(num_segments + 1):
-        phi = i * phi_step
-        for j in range(num_segments + 1):
-            theta = j * theta_step
-            
-            x = radius * np.sin(phi) * np.cos(theta)
-            y = radius * np.sin(phi) * np.sin(theta)
-            z = radius * np.cos(phi)
-            
-            vertex = center + np.array([x, y, z])
-            vertices.append(vertex)
-    
-    # Generate faces
-    num_vertices_per_level = num_segments + 1
-    for i in range(num_segments):
-        for j in range(num_segments):
-            v1 = vertex_offset + i * num_vertices_per_level + j
-            v2 = vertex_offset + i * num_vertices_per_level + (j + 1)
-            v3 = vertex_offset + (i + 1) * num_vertices_per_level + j
-            v4 = vertex_offset + (i + 1) * num_vertices_per_level + (j + 1)
-            
-            # Two triangles per quad
-            faces.append([v1, v2, v3])
-            faces.append([v2, v4, v3])
-    
-    return np.array(vertices), faces
+    return result
 
 
-def calculate_fov_from_focal_length(focal_length_mm: float, sensor_dimension_mm: float) -> float:
+def extract_poses_from_directory(image_dir: str, pattern: str = "*.jpg", 
+                                  output_file: Optional[str] = None,
+                                  export_ply: bool = True,
+                                  ply_output_file: Optional[str] = None) -> List[Dict]:
     """
-    Calculate field of view in degrees from focal length and sensor dimension.
+    Extract camera poses from all images in a directory.
     
     Args:
-        focal_length_mm: Focal length in millimeters
-        sensor_dimension_mm: Sensor dimension (width or height) in millimeters
+        image_dir: Directory containing images
+        pattern: File pattern to match (default: "*.jpg")
+        output_file: Optional path to save camera_poses.json
+        export_ply: Whether to export PLY file (default: True)
+        ply_output_file: Optional path for PLY output (default: outputs/camera_poses_3d.ply)
     
     Returns:
-        Field of view in degrees
+        List of camera pose dictionaries
     """
-    fov_rad = 2 * math.atan(sensor_dimension_mm / (2 * focal_length_mm))
-    return math.degrees(fov_rad)
+    image_dir_path = Path(image_dir)
+    image_files = sorted(image_dir_path.glob(pattern))
+    
+    poses = []
+    for img_path in image_files:
+        pose = extract_camera_pose(str(img_path))
+        poses.append(pose)
+    
+    # Save to JSON if output_file is provided
+    if output_file:
+        Path(output_file).parent.mkdir(parents=True, exist_ok=True)
+        with open(output_file, 'w') as f:
+            json.dump(poses, f, indent=2)
+        print(f"Saved camera poses to: {output_file}")
+    
+    # Export to PLY if requested
+    if export_ply:
+        if not output_file:
+            # Default output file if not provided
+            output_file = "outputs/camera_poses.json"
+            Path(output_file).parent.mkdir(parents=True, exist_ok=True)
+            with open(output_file, 'w') as f:
+                json.dump(poses, f, indent=2)
+        
+        if not ply_output_file:
+            ply_output_file = str(Path(output_file).parent / "camera_poses_3d.ply")
+        
+        export_camera_poses_to_ply(str(output_file), ply_output_file)
+    
+    return poses
 
 
+if __name__ == "__main__":
+    import sys
+    
+    image_dir = "/Users/mauriciohessflores/Documents/Code/MyCode/research-qualicum_beach_gcp_analysis/input/images"
+    output_file = "outputs/camera_poses.json"
+    
+    print("Extracting camera poses from images...")
+    poses = extract_poses_from_directory(image_dir)
+    
+    # Filter to only images from the central cell for now
+    central_cell = "8928d89ac57ffff"
+    cell_poses = [p for p in poses if central_cell in p['image_name']]
+    
+    print(f"Extracted poses from {len(cell_poses)} images")
+    print(f"Images with GPS: {sum(1 for p in cell_poses if p['gps'] is not None)}")
+    print(f"Images with orientation: {sum(1 for p in cell_poses if p['orientation'] is not None)}")
+    
+    # Save to JSON
+    Path(output_file).parent.mkdir(parents=True, exist_ok=True)
+    with open(output_file, 'w') as f:
+        json.dump(cell_poses, f, indent=2)
+    
+    print(f"Saved camera poses to: {output_file}")
+    
+    # Print sample
+    if cell_poses:
+        print("\nSample pose data:")
+        sample = cell_poses[0]
+        print(json.dumps(sample, indent=2))
 def compute_footprint_from_exif(
     gps: dict,
     dji_orientation: dict,
@@ -649,7 +795,7 @@ def export_camera_poses_to_ply(
         
         # Try to get rotation from DJI orientation
         if pose.get('dji_orientation'):
-            from tiepoint_matcher.dji_exif_parser import get_camera_rotation_from_dji_orientation
+            from .dji_exif_parser import get_camera_rotation_from_dji_orientation
             R = get_camera_rotation_from_dji_orientation(pose['dji_orientation'])
             # Camera Z-axis (forward) in world coordinates
             camera_direction = R @ np.array([0, 0, 1])
@@ -809,23 +955,3 @@ def export_camera_poses_to_ply(
     print(f'    X: [{x_range[0]:.2f}, {x_range[1]:.2f}] meters')
     print(f'    Y: [{y_range[0]:.2f}, {y_range[1]:.2f}] meters')
     print(f'    Z: [{z_range[0]:.2f}, {z_range[1]:.2f}] meters (altitude variation)')
-    print(f'  Note: Z coordinates are relative to origin altitude ({origin_alt:.2f}m).')
-    print(f'        The ground plane at z=0 provides a reference to visualize the')
-    print(f'        {z_range[1]-z_range[0]:.2f}m altitude variation of the cameras.')
-
-
-if __name__ == '__main__':
-    import sys
-    
-    camera_poses_file = 'outputs/camera_poses.json'
-    output_file = 'test_visualization/camera_poses_3d.ply'
-    
-    if len(sys.argv) > 1:
-        camera_poses_file = sys.argv[1]
-    if len(sys.argv) > 2:
-        output_file = sys.argv[2]
-    
-    # Create output directory if needed
-    Path(output_file).parent.mkdir(parents=True, exist_ok=True)
-    
-    export_camera_poses_to_ply(camera_poses_file, output_file)

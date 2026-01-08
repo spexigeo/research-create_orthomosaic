@@ -13,7 +13,7 @@ The tiepoint matcher uses LightGlue for feature detection and matching, and expo
 - **INTRA-cell matching**: Match features within a single H3 cell
 - **LightGlue-based matching**: State-of-the-art feature matching using LightGlue
 - **Footprint overlap filtering**: Only match image pairs with sufficient ground coverage overlap (default: 50%)
-- **Memory-efficient**: Uses top 100 features per image to reduce memory usage
+- **Memory-efficient**: Uses top 200 features per image (configurable)
 - **Parallel processing**: Multi-threaded matching for faster processing
 - **MetaShape export**: Export tiepoints in MetaShape-compatible JSON format
 - **Track computation**: Generate feature tracks across multiple images
@@ -37,7 +37,7 @@ pip install -e .
 ### Running the Test Script
 
 ```bash
-python test_tiepoint_matcher.py [--min-overlap MIN_OVERLAP]
+python matcher.py [--min-overlap MIN_OVERLAP]
 ```
 
 **Options:**
@@ -46,10 +46,10 @@ python test_tiepoint_matcher.py [--min-overlap MIN_OVERLAP]
 **Example:**
 ```bash
 # Use default 50% overlap threshold
-python test_tiepoint_matcher.py
+python matcher.py
 
 # Use 30% overlap threshold
-python test_tiepoint_matcher.py --min-overlap 30.0
+python matcher.py --min-overlap 30.0
 ```
 
 ### What the Script Does
@@ -57,7 +57,7 @@ python test_tiepoint_matcher.py --min-overlap 30.0
 1. **Parse images**: Extracts H3 cell information from image filenames
 2. **Find central cell**: Identifies the central H3 cell (completely surrounded by 6 neighbors)
 3. **Create quarter-resolution images**: Generates downsampled images for faster processing
-4. **Extract features**: Detects features using SuperPoint (top 100 per image)
+4. **Extract features**: Detects features using SuperPoint (top 200 per image)
 5. **Match features**: Matches features between image pairs with sufficient footprint overlap
 6. **Compute tracks**: Links matched features across multiple images to form tracks
 7. **Reconstruct point cloud**: Performs 3D reconstruction from feature tracks
@@ -86,7 +86,11 @@ The script generates the following output files in the `outputs/` directory:
 - `overlap_counts_per_image.png`: Number of overlapping images per image
 - `track_length_histogram_cell_{cell}.png`: Distribution of track lengths
 - `matches_visualization_cell_{cell}.png`: Visual match examples
-- `test_visualization/track_{id}_first_{n}_images.png`: Track visualizations showing matched features
+- `visualization/camera_poses.png`: Camera position and orientation visualization
+- `visualization/footprints_2d.png`: 2D footprint visualization
+- `visualization/track_{id}_first_{n}_images.png`: Track visualizations showing matched features
+- `visualize_single_track/track_{id}_first_{n}_images.png`: Individual track visualizations
+- `visualize_tracks_on_images/tracks_{img1}_{img2}_{img3}.png`: Track visualizations on image triplets
 
 #### Analysis Files
 - `cell_analysis.json`: H3 cell organization analysis
@@ -96,7 +100,7 @@ The script generates the following output files in the `outputs/` directory:
 ### Programmatic Usage
 
 ```python
-from tiepoint_matcher import (
+from matcher import (
     find_central_cell,
     get_cell_images,
     LightGlueMatcher,
@@ -115,11 +119,11 @@ central_cell = find_central_cell(cell_ids)
 # Get images for central cell
 cell_images = cell_to_images[central_cell]
 
-# Initialize matcher (100 features per image, uses GPU if available)
+# Initialize matcher (200 features per image, uses GPU if available)
 matcher = LightGlueMatcher(
     extractor_type='superpoint',
     device=None,  # Auto-detect: CUDA, MPS (Apple Silicon), or CPU
-    max_features_per_image=100
+    max_features_per_image=200
 )
 
 # Match features within cell
@@ -135,7 +139,7 @@ visualize_features_and_matches(match_results, cell_images, "output/visualization
 ## Key Features and Optimizations
 
 ### Memory Optimization
-- **Top 100 features per image**: Only the highest-scoring features are kept to reduce memory usage
+- **Top 200 features per image**: Only the highest-scoring features are kept to reduce memory usage
 - **Quarter-resolution matching**: Images are downsampled to 25% resolution for faster processing
 - **Efficient caching**: Features and matches are cached to disk for faster re-runs
 
@@ -199,18 +203,46 @@ The exported JSON file follows MetaShape's match file format:
 
 ## Architecture
 
-The module consists of:
+The module is organized into the `matcher/` package with the following structure:
 
-- `h3_utils.py`: H3 cell utilities and image filename parsing
-- `lightglue_matcher.py`: LightGlue-based feature extraction and matching
-- `metashape_export.py`: Export to MetaShape-compatible formats
-- `visualization.py`: Visualization functions for features and matches
-- `track_analysis.py`: Track computation and analysis
-- `point_cloud_reconstruction.py`: 3D point cloud reconstruction
-- `robust_reconstruction.py`: Robust reconstruction with bundle adjustment
-- `epipolar_validation.py`: Epipolar geometry validation (currently disabled)
-- `image_utils.py`: Image processing utilities
-- `ply_export.py`: PLY file export for 3D visualization
+### Core Modules
+- `matcher/h3_utils.py`: H3 cell utilities and image filename parsing
+- `matcher/lightglue_matcher.py`: LightGlue-based feature extraction and matching
+- `matcher/metashape_export.py`: Export to MetaShape-compatible formats
+- `matcher/track_analysis.py`: Track computation and analysis
+- `matcher/point_cloud_reconstruction.py`: 3D point cloud reconstruction
+- `matcher/robust_reconstruction.py`: Robust reconstruction with bundle adjustment
+- `matcher/epipolar_validation.py`: Epipolar geometry validation (currently disabled)
+- `matcher/image_utils.py`: Image processing utilities
+- `matcher/ply_export.py`: PLY file export for 3D visualization
+
+### Consolidated Modules
+- `matcher/visualization.py`: All visualization functions consolidated:
+  - `visualize_features_and_matches()`: Feature and match visualization
+  - `visualize_feature_distribution()`: Feature statistics
+  - `visualize_single_track()`: Single track visualization
+  - `visualize_tracks_on_image_triplets()`: Track visualization on image triplets
+  - `create_multiple_track_visualizations()`: Batch track visualization
+  - `visualize_overlap_counts()`: Footprint overlap statistics
+  - `visualize_camera_poses()`: Camera pose visualization
+  - `visualize_footprints_2d()`: 2D footprint visualization
+
+- `matcher/cameras.py`: Camera pose extraction and PLY export:
+  - `extract_camera_pose()`: Extract pose from single image
+  - `extract_poses_from_directory()`: Extract poses from directory
+  - `export_camera_poses_to_ply()`: Export camera poses to PLY format
+  - `compute_footprint_from_exif()`: Compute footprint from EXIF data
+
+- `matcher/utils.py`: Utility functions:
+  - `compute_all_overlaps()`: Compute footprint overlaps for all image pairs
+  - `compute_overlap_percentage()`: Calculate overlap between two footprints
+  - `compute_footprint_polygon()`: Compute footprint polygon from EXIF
+  - `debug_track()`: Debug track matching
+  - `detect_scanlines()`: Detect scanlines from camera poses
+  - `verify_scanline_straightness()`: Verify scanline quality
+
+### Main Script
+- `matcher.py`: Main matching script (renamed from `test_tiepoint_matcher.py`)
 
 ## Dependencies
 
