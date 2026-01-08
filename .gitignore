@@ -3,6 +3,7 @@
 inputs/
 outputs/
 outputs_*/
+TEMP/
 
 # Python cache files
 __pycache__/
