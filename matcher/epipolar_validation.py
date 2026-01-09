@@ -48,7 +48,7 @@ def gps_to_local_utm(lat: float, lon: float, alt: float,
     return np.array([point_x - origin_x, point_y - origin_y, alt])
 
 
-def estimate_camera_intrinsics(image_width: int = 1000, image_height: int = 750,
+def estimate_camera_intrinsics(image_width: int, image_height: int,
                                sensor_width_mm: float = 13.2, focal_length_mm: float = 8.8) -> np.ndarray:
     """
     Estimate camera intrinsics matrix.
@@ -160,8 +160,8 @@ def validate_matches_epipolar(
     matches: List[Dict],
     features: Dict,
     camera_poses: Dict[str, Dict],
-    image_width: int = 1000,
-    image_height: int = 750,
+    image_width: int,
+    image_height: int,
     threshold: float = 2.0,
     origin_lat: Optional[float] = None,
     origin_lon: Optional[float] = None
@@ -296,8 +296,8 @@ def filter_matches_epipolar_robust(
     matches_file: str,
     features_file: str,
     output_file: str,
-    image_width: int = 1000,
-    image_height: int = 750,
+    image_width: int,
+    image_height: int,
     ransac_threshold: float = 0.5,
     confidence: float = 0.999,
     max_iters: int = 2000

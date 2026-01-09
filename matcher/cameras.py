@@ -211,7 +211,14 @@ def extract_poses_from_directory(image_dir: str, pattern: str = "*.jpg",
         if not ply_output_file:
             ply_output_file = str(Path(output_file).parent / "camera_poses_3d.ply")
         
-        export_camera_poses_to_ply(str(output_file), ply_output_file)
+        # Read image dimensions from first image
+        from matcher.utils import get_image_dimensions
+        if image_files:
+            image_width, image_height = get_image_dimensions(str(image_files[0]))
+        else:
+            raise ValueError("No images found to read dimensions from")
+        
+        export_camera_poses_to_ply(str(output_file), ply_output_file, image_width, image_height)
     
     return poses
 
@@ -610,13 +617,13 @@ def create_arrow(start: np.ndarray, direction: np.ndarray, length: float,
 def export_camera_poses_to_ply(
     camera_poses_file: str,
     output_file: str,
+    image_width: int,
+    image_height: int,
     sphere_radius: float = 5.0,
     arrow_length: float = 20.0,
     arrow_shaft_radius: float = 0.5,
     arrow_head_length: float = 5.0,
     arrow_head_radius: float = 2.0,
-    image_width: int = 4000,
-    image_height: int = 3000,
     focal_length_mm: float = 8.8,
     sensor_width_mm: float = 13.2,
     draw_footprints: bool = True

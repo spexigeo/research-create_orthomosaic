@@ -8,6 +8,7 @@ import numpy as np
 from pathlib import Path
 import sys
 from typing import Dict, List, Tuple, Optional
+from PIL import Image
 
 # Import footprint calculation from the inputs module
 # Try multiple possible paths for the inputs directory
@@ -89,6 +90,23 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "shapely"])
     from shapely.geometry import Polygon
     SHAPELY_AVAILABLE = True
+
+
+def get_image_dimensions(image_path: str) -> Tuple[int, int]:
+    """
+    Read image dimensions from an actual image file.
+    
+    Args:
+        image_path: Path to image file
+        
+    Returns:
+        Tuple of (width, height) in pixels
+    """
+    try:
+        img = Image.open(image_path)
+        return img.size[0], img.size[1]  # (width, height)
+    except Exception as e:
+        raise ValueError(f"Could not read image dimensions from {image_path}: {e}")
 
 
 def calculate_fov_from_focal_length(focal_length_mm: float, sensor_dimension_mm: float) -> float:

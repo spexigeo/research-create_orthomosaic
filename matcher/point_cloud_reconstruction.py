@@ -34,7 +34,7 @@ def gps_to_local_utm(lat: float, lon: float, alt: float,
     return np.array([x, y, z])
 
 
-def estimate_camera_intrinsics(image_width: int = 4000, image_height: int = 3000,
+def estimate_camera_intrinsics(image_width: int, image_height: int,
                                sensor_width_mm: float = 13.2, focal_length_mm: float = 8.8) -> np.ndarray:
     """Estimate camera intrinsics matrix."""
     focal_length_px = (focal_length_mm / sensor_width_mm) * image_width
@@ -289,8 +289,8 @@ def reconstruct_point_cloud(
     camera_poses: Dict[str, Dict],
     origin_lat: float,
     origin_lon: float,
-    image_width: int = 4000,
-    image_height: int = 3000,
+    image_width: int,
+    image_height: int,
     max_reprojection_error: float = 2.0,
     min_views: int = 2
 ) -> Tuple[List[Dict], Dict]:

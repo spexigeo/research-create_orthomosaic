@@ -27,7 +27,7 @@ def export_to_metashape(match_results: Dict, output_path: str,
         "cameras": {
             "image1.jpg": {
                 "path": "path/to/image1.jpg",
-                "sensor": {"width": 4000, "height": 3000, "type": "frame"},
+                "sensor": {"width": <width>, "height": <height>, "type": "frame"},  # Dimensions read from actual image
                 "features": [
                     {"id": 0, "x": 100.5, "y": 200.3},
                     ...
@@ -67,13 +67,9 @@ def export_to_metashape(match_results: Dict, output_path: str,
         # Get image filename
         image_filename = Path(image_path).name
         
-        # Get image dimensions
-        try:
-            img = Image.open(image_path)
-            width, height = img.size
-        except Exception:
-            # Default dimensions if can't read
-            width, height = 4000, 3000
+        # Get image dimensions - must be readable from image
+        img = Image.open(image_path)
+        width, height = img.size
         
         # Build features list with local indices
         camera_features = []

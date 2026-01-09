@@ -10,7 +10,7 @@ from pathlib import Path
 from collections import defaultdict
 
 
-def estimate_camera_intrinsics(image_width: int = 4000, image_height: int = 3000,
+def estimate_camera_intrinsics(image_width: int, image_height: int,
                                sensor_width_mm: float = 13.2, focal_length_mm: float = 8.8) -> np.ndarray:
     """Estimate camera intrinsics matrix."""
     focal_length_px = (focal_length_mm / sensor_width_mm) * image_width
@@ -121,8 +121,8 @@ def initialize_camera_poses(
     origin_lat: float,
     origin_lon: float,
     K: np.ndarray,
-    image_width: int = 4000,
-    image_height: int = 3000
+    image_width: int,
+    image_height: int
 ) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
     """
     Initialize camera poses using GPS and refine with feature matches.
@@ -319,8 +319,8 @@ def aerial_triangulation(
     camera_poses_gps: Dict[str, Dict],
     origin_lat: float,
     origin_lon: float,
-    image_width: int = 4000,
-    image_height: int = 3000,
+    image_width: int,
+    image_height: int,
     max_points: int = 1000
 ) -> Tuple[Dict[str, Tuple[np.ndarray, np.ndarray]], np.ndarray, Dict]:
     """

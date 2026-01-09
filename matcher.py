@@ -212,6 +212,14 @@ def main(min_overlap_threshold: float = 50.0, enable_epipolar_filtering: bool = 
     
     print(f"   Found {len(quarter_res_images)} quarter-resolution images")
     
+    # Read actual image dimensions from the first image
+    from matcher.utils import get_image_dimensions
+    if quarter_res_images:
+        quarter_res_width, quarter_res_height = get_image_dimensions(quarter_res_images[0])
+        print(f"   Image dimensions (read from images): {quarter_res_width}x{quarter_res_height}")
+    else:
+        raise ValueError("No quarter-resolution images found to read dimensions from")
+    
     # Step 4: Initialize matcher
     print("\n4. Initializing LightGlue matcher...")
     max_features = 200  # Top features per image for matching
@@ -575,8 +583,8 @@ def main(min_overlap_threshold: float = 50.0, enable_epipolar_filtering: bool = 
                 matches_file=str(matches_output_unfiltered),
                 features_file=str(features_output),
                 output_file=str(matches_output_filtered),
-                image_width=1000,  # Quarter-resolution: 4000 / 4 = 1000
-                image_height=750,  # Quarter-resolution: 3000 / 4 = 750
+                image_width=quarter_res_width,
+                image_height=quarter_res_height,
                 ransac_threshold=0.5,
                 confidence=0.999,
                 max_iters=2000
@@ -905,52 +913,144 @@ def main(min_overlap_threshold: float = 50.0, enable_epipolar_filtering: bool = 
                 only_three_image_tracks=True
             )
     
-    # Step 8.5: Reconstruct point cloud from tracks (DISABLED FOR NOW)
-    print("\n8.5. Point cloud reconstruction disabled for now")
-    # poses_file = output_dir / "camera_poses.json"
-    # 
-    # if poses_file.exists():
-    #     try:
-    #         with open(poses_file, 'r') as f:
-    #                 #             camera_poses_list = json.load(f)
-    #         
-    #         # Convert to dictionary keyed by image name
-    #             #         camera_poses_dict = {p['image_name']: p for p in camera_poses_list}
-    #         
-    #         # Determine origin from first pose
-    #         first_pose = next(iter(camera_poses_dict.values()))
-    #         if first_pose.get('gps'):
-    #             origin_lat = first_pose['gps']['latitude']
-    #             origin_lon = first_pose['gps']['longitude']
-    #             
-    #             # (rest of point cloud code would go here - commented out for now)
-    #             
-    #             # Use robust reconstruction with bundle adjustment
-    #             # Set filter_outliers=False to see all points and check if they form a ground plane
-    #             # camera_poses_refined, points_3d, point_cloud, pc_stats = robust_reconstruct_with_bundle_adjustment(
-    #             #     tracks_data['tracks'],
-    #             #     match_results['matches'],
-    #             #     match_results['features'],
-    #             #     camera_poses_dict,
-    #             #     origin_lat,
-    #             #     origin_lon,
-    #             #     image_width=4000,
-    #             #     image_height=3000,
-    #             #     max_reprojection_error=10.0,  # Increased threshold since we're not filtering
-    #             #     use_bundle_adjustment=False,  # Disable for now to see raw triangulation
-    #             #     filter_outliers=False  # Don't filter - use all tracks
-    #             # )
-    #             
-    #             # ... (rest of point cloud code commented out)
-    #         else:
-    #             print("   Warning: No GPS data in camera poses, skipping point cloud reconstruction")
-    #     except Exception as e:
-    #         print(f"   Warning: Error during point cloud reconstruction: {e}")
-    #         import traceback
-    #         traceback.print_exc()
-    # else:
-    #     print(f"   Warning: Camera poses file not found: {poses_file}")
-    #     print("   Run extract_camera_poses.py first to enable point cloud reconstruction")
+    # Step 8.5: Reconstruct point cloud from tracks
+    print("\n8.5. Reconstructing point cloud from tracks...")
+    poses_file = camera_poses_file
+    
+    if poses_file.exists():
+        try:
+            with open(poses_file, 'r') as f:
+                camera_poses_list = json.load(f)
+            
+            # Convert to dictionary keyed by image name
+            # Camera poses use original image names (e.g., "8928d89ac57ffff_172550_0001.jpg")
+            # but tracks/features use quarter-resolution names (e.g., "quarter_8928d89ac57ffff_172550_0001.jpg")
+            camera_poses_dict = {}
+            feature_keys = list(match_results['features'].keys())
+            
+            for p in camera_poses_list:
+                img_name = p['image_name']
+                # Build quarter-resolution name
+                quarter_name = f"quarter_{img_name}"
+                
+                # Check if this quarter name exists in features
+                if quarter_name in feature_keys:
+                    camera_poses_dict[quarter_name] = p
+                else:
+                    # Fallback: try to find by matching the base name
+                    img_base = Path(img_name).name
+                    found = False
+                    for feat_key in feature_keys:
+                        if isinstance(feat_key, str) and Path(feat_key).name == img_base:
+                            camera_poses_dict[feat_key] = p
+                            found = True
+                            break
+                    if not found:
+                        # Last resort: use original name
+                        camera_poses_dict[img_name] = p
+                        print(f"   Warning: Could not find matching feature key for {img_name}")
+            
+            # Determine origin from first pose
+            first_pose = next(iter(camera_poses_dict.values()))
+            if first_pose.get('gps'):
+                origin_lat = first_pose['gps']['latitude']
+                origin_lon = first_pose['gps']['longitude']
+                
+                print(f"   Using origin: ({origin_lat:.6f}, {origin_lon:.6f})")
+                print(f"   Image dimensions: {quarter_res_width}x{quarter_res_height}")
+                
+                # Use filtered tracks if available, otherwise use unfiltered
+                if use_filtered and tracks_output_filtered and tracks_output_filtered.exists():
+                    print("   Loading filtered tracks for point cloud reconstruction...")
+                    with open(tracks_output_filtered, 'r') as f:
+                        filtered_tracks_data = json.load(f)
+                    tracks_for_reconstruction = filtered_tracks_data['tracks']
+                    
+                    # Use filtered matches
+                    if matches_output_filtered and matches_output_filtered.exists():
+                        with open(matches_output_filtered, 'r') as f:
+                            filtered_matches_data = json.load(f)
+                        # Convert filtered matches to the format expected by reconstruction
+                        matches_for_reconstruction = []
+                        for match_dict in filtered_matches_data:
+                            img0_path = match_dict['image0']
+                            img1_path = match_dict['image1']
+                            
+                            # Find full paths in features
+                            img0_full = None
+                            img1_full = None
+                            for feat_path in match_results['features'].keys():
+                                if Path(feat_path).name == Path(img0_path).name or feat_path.endswith(Path(img0_path).name):
+                                    img0_full = feat_path
+                                if Path(feat_path).name == Path(img1_path).name or feat_path.endswith(Path(img1_path).name):
+                                    img1_full = feat_path
+                            
+                            if img0_full and img1_full:
+                                matches_for_reconstruction.append({
+                                    'image0': img0_full,
+                                    'image1': img1_full,
+                                    'matches': np.array(match_dict['matches']),
+                                    'num_matches': match_dict['num_matches'],
+                                    'match_confidence': match_dict.get('match_confidence', [])
+                                })
+                        print(f"   Using {len(tracks_for_reconstruction)} filtered tracks and {len(matches_for_reconstruction)} filtered match pairs")
+                    else:
+                        matches_for_reconstruction = matches_for_tracks
+                        print(f"   Using {len(tracks_for_reconstruction)} filtered tracks with unfiltered matches")
+                else:
+                    tracks_for_reconstruction = tracks_data['tracks']
+                    matches_for_reconstruction = matches_for_tracks
+                    print("   Using unfiltered tracks for point cloud reconstruction")
+                
+                # Use robust reconstruction with bundle adjustment
+                from matcher.robust_reconstruction import robust_reconstruct_with_bundle_adjustment
+                from matcher.ply_export import export_point_cloud_to_ply
+                
+                camera_poses_refined, points_3d, point_cloud, pc_stats = robust_reconstruct_with_bundle_adjustment(
+                    tracks_for_reconstruction,
+                    matches_for_reconstruction,
+                    match_results['features'],
+                    camera_poses_dict,
+                    origin_lat,
+                    origin_lon,
+                    image_width=quarter_res_width,
+                    image_height=quarter_res_height,
+                    max_reprojection_error=2.0,
+                    use_bundle_adjustment=True,
+                    filter_outliers=True
+                )
+                
+                print(f"   Reconstructed {len(points_3d)} 3D points from {len(tracks_for_reconstruction)} tracks")
+                print(f"   Bundle adjustment RMSE: {pc_stats.get('bundle_adjustment', {}).get('final_cost', 'N/A')}")
+                
+                # Save point cloud to JSON
+                point_cloud_json = output_dir / f"point_cloud_cell_{central_cell}.json"
+                point_cloud_data = {
+                    'num_points': len(point_cloud),
+                    'points': point_cloud,
+                    'stats': pc_stats
+                }
+                with open(point_cloud_json, 'w') as f:
+                    json.dump(point_cloud_data, f, indent=2)
+                print(f"   Saved point cloud JSON to: {point_cloud_json}")
+                
+                # Export to PLY
+                point_cloud_ply = output_dir / f"point_cloud_cell_{central_cell}.ply"
+                export_point_cloud_to_ply(
+                    str(point_cloud_json),
+                    str(point_cloud_ply),
+                    color_by_error=True
+                )
+                print(f"   Saved point cloud PLY to: {point_cloud_ply}")
+            else:
+                print("   Warning: No GPS data in camera poses, skipping point cloud reconstruction")
+        except Exception as e:
+            print(f"   Warning: Error during point cloud reconstruction: {e}")
+            import traceback
+            traceback.print_exc()
+    else:
+        print(f"   Warning: Camera poses file not found: {poses_file}")
+        print("   Run extract_camera_poses.py first to enable point cloud reconstruction")
     
     # Step 9: Performance summary
     print("\n9. Performance Summary:")

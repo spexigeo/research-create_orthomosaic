@@ -72,8 +72,8 @@ def robust_reconstruct_with_bundle_adjustment(
     camera_poses_gps: Dict[str, Dict],
     origin_lat: float,
     origin_lon: float,
-    image_width: int = 4000,
-    image_height: int = 3000,
+    image_width: int,
+    image_height: int,
     max_reprojection_error: float = 2.0,
     use_bundle_adjustment: bool = True,
     filter_outliers: bool = False
