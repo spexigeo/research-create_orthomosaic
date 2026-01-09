@@ -46,6 +46,14 @@ def visualize_features_and_matches(
     
     if not relevant_matches:
         print("No matches found to visualize")
+        # Create an empty figure with a message
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+        ax.text(0.5, 0.5, 'No matches found to visualize\n(Check that image paths match between matches and image_paths)', 
+                ha='center', va='center', fontsize=14, transform=ax.transAxes)
+        ax.axis('off')
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()
         return
     
     # Calculate grid size
@@ -67,9 +75,22 @@ def visualize_features_and_matches(
         match_indices = match_dict['matches']
         match_confidence = match_dict.get('match_confidence', None)
         
+        # Check if features exist for both images
+        if img0_path not in features or img1_path not in features:
+            ax.text(0.5, 0.5, f'Features not found\n{Path(img0_path).name}\n{Path(img1_path).name}', 
+                    ha='center', va='center', fontsize=10, transform=ax.transAxes)
+            ax.axis('off')
+            continue
+        
         # Load images
-        img0 = np.array(Image.open(img0_path))
-        img1 = np.array(Image.open(img1_path))
+        try:
+            img0 = np.array(Image.open(img0_path))
+            img1 = np.array(Image.open(img1_path))
+        except Exception as e:
+            ax.text(0.5, 0.5, f'Error loading images:\n{str(e)}', 
+                    ha='center', va='center', fontsize=10, transform=ax.transAxes)
+            ax.axis('off')
+            continue
         
         # Get features
         feats0 = features[img0_path]
@@ -427,6 +448,7 @@ def visualize_track(track_id: int, num_images: int = 5,
                 
                 # Check if this feature is directly matched to previous
                 is_direct_match = False
+                has_indirect_match = False
                 if verify_matches and idx > 0 and matches_data:
                     prev_feature_info = images_to_show[idx-1]
                     if isinstance(prev_feature_info, (list, tuple)) and len(prev_feature_info) == 2:
@@ -435,16 +457,32 @@ def visualize_track(track_id: int, num_images: int = 5,
                         curr_img_basename = Path(img_name).name
                         match_dict = match_lookup.get((prev_img_basename, curr_img_basename), {})
                         is_direct_match = (prev_feat_idx in match_dict and match_dict[prev_feat_idx] == feat_idx)
+                        
+                        # Check if there's any match between these images (even if not this specific feature pair)
+                        if not is_direct_match and (prev_img_basename, curr_img_basename) in match_lookup:
+                            has_indirect_match = True
                 
                 # Set title with match status
-                match_status = "✓ Match verified" if is_direct_match else "⚠ Match not found in matches file"
+                if is_direct_match:
+                    match_status = "✓ Direct match verified"
+                    status_color = 'green'
+                    dot_color = 'red'
+                elif has_indirect_match:
+                    match_status = "→ Connected via track (no direct match)"
+                    status_color = 'blue'
+                    dot_color = 'orange'
+                else:
+                    match_status = "→ Track connection (matches file may not have this pair)"
+                    status_color = 'gray'
+                    dot_color = 'orange'
                 axes[idx].set_title(f"{original_img_name}\nFeature {feat_idx} at ({kpt[0]:.0f}, {kpt[1]:.0f})\n{match_status}", 
-                                   fontsize=9, color='green' if is_direct_match else 'orange')
+                                   fontsize=9, color=status_color)
                 
                 # Draw big red dot at feature location
-                color = 'red' if is_direct_match else 'orange'
+                color = dot_color
+                markeredge_color = 'darkred' if is_direct_match else ('darkorange' if has_indirect_match else 'darkgray')
                 axes[idx].plot(kpt[0], kpt[1], 'o', color=color,
-                              markersize=30, markeredgecolor='darkred' if is_direct_match else 'darkorange', 
+                              markersize=30, markeredgecolor=markeredge_color, 
                               markeredgewidth=3, alpha=0.8, label='Feature')
                 # Also draw a circle for better visibility
                 from matplotlib.patches import Circle
@@ -814,7 +852,7 @@ def create_multiple_track_visualizations(
                 matches_file=matches_file,
                 image_dir=image_dir,
                 output_dir=output_dir,
-                verify_matches=False  # Disable match verification for speed
+                verify_matches=True  # Enable match verification to show match status
             )
             print(f"  ✓ Created visualization for track {track_id} (length {track_length})")
         except Exception as e:

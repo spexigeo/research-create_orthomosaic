@@ -73,7 +73,7 @@ def load_footprint_overlaps(overlaps_file: str = "outputs/footprint_overlaps.jso
         return {}
 
 
-def main(min_overlap_threshold: float = 50.0):
+def main(min_overlap_threshold: float = 50.0, enable_epipolar_filtering: bool = True):
     # Paths
     image_dir = Path("/Users/mauriciohessflores/Documents/Code/MyCode/research-qualicum_beach_gcp_analysis/input/images")
     output_dir = Path("outputs")
@@ -178,9 +178,13 @@ def main(min_overlap_threshold: float = 50.0):
     
     if not footprint_overlaps_file.exists():
         print(f"   Computing footprint overlaps (will filter pairs with < {min_overlap_threshold}% overlap)...")
+        csv_file = str(footprint_overlaps_file).replace('.json', '.csv')
         compute_all_overlaps(
+            image_dir="",  # Not used, kept for compatibility
+            output_dir="",  # Not used, kept for compatibility
             camera_poses_file=str(camera_poses_file),
-            output_file=str(footprint_overlaps_file),
+            output_json_file=str(footprint_overlaps_file),
+            output_csv_file=csv_file,
             focal_length_mm=8.8,
             sensor_width_mm=13.2,
             sensor_height_mm=9.9
@@ -558,7 +562,31 @@ def main(min_overlap_threshold: float = 50.0):
         json.dump(matches_data_unfiltered, f, indent=2)
     print(f"     Saved unfiltered matches to: {matches_output_unfiltered}")
     
-    # Epipolar validation disabled - using unfiltered matches only
+    # Step 5.6: Epipolar filtering (optional)
+    matches_output_filtered = None
+    if enable_epipolar_filtering:
+        print("\n5.6. Filtering matches using robust epipolar geometry...")
+        from matcher.epipolar_validation import filter_matches_epipolar_robust
+        
+        matches_output_filtered = output_dir / f"matches_filtered_cell_{central_cell}.json"
+        
+        if not matches_output_filtered.exists():
+            epipolar_stats = filter_matches_epipolar_robust(
+                matches_file=str(matches_output_unfiltered),
+                features_file=str(features_output),
+                output_file=str(matches_output_filtered),
+                image_width=1000,  # Quarter-resolution: 4000 / 4 = 1000
+                image_height=750,  # Quarter-resolution: 3000 / 4 = 750
+                ransac_threshold=0.5,
+                confidence=0.999,
+                max_iters=2000
+            )
+            print(f"   Saved filtered matches to: {matches_output_filtered}")
+            print(f"   Epipolar filtering stats: {epipolar_stats}")
+        else:
+            print(f"   Filtered matches file already exists: {matches_output_filtered}")
+    else:
+        print("\n5.6. Epipolar filtering disabled (using unfiltered matches)")
     
     # Save statistics
     stats_output = output_dir / f"statistics_cell_{central_cell}.json"
@@ -594,9 +622,10 @@ def main(min_overlap_threshold: float = 50.0):
     
     # Visualization 1: Feature and match visualization (top pairs)
     viz_output = output_dir / f"matches_visualization_cell_{central_cell}.png"
+    # Use quarter_res_images instead of cell_images since matches use quarter-resolution paths
     visualize_features_and_matches(
         match_results,
-        cell_images[:20],  # Visualize first 20 images
+        quarter_res_images[:20] if len(quarter_res_images) >= 20 else quarter_res_images,  # Visualize first 20 images
         str(viz_output),
         max_pairs=10
     )
@@ -639,8 +668,57 @@ def main(min_overlap_threshold: float = 50.0):
         print(f"   Maximum overlaps per image: {max_overlap_count}")
         print(f"   Limiting track length to {max_overlap_count} (max overlap count)")
     
+    # Determine which matches to use for tracks
+    matches_for_tracks = match_results['matches']
+    tracks_output_filtered = None
+    use_filtered = False
+    
+    # If filtered matches exist, use them; otherwise use unfiltered
+    if enable_epipolar_filtering and matches_output_filtered and matches_output_filtered.exists():
+        print("   Using filtered matches for track computation...")
+        with open(matches_output_filtered, 'r') as f:
+            filtered_matches_data = json.load(f)
+        
+        # Convert filtered matches to the format expected by compute_tracks
+        # Need to map image names back to full paths
+        filtered_matches_for_tracks = []
+        for match_dict in filtered_matches_data:
+            # Find full paths for images
+            img0_name = match_dict['image0']
+            img1_name = match_dict['image1']
+            
+            # Try to find full paths in features
+            img0_path = None
+            img1_path = None
+            for feat_path in match_results['features'].keys():
+                feat_name = Path(feat_path).name
+                if feat_name == img0_name or feat_path.endswith(img0_name):
+                    img0_path = feat_path
+                if feat_name == img1_name or feat_path.endswith(img1_name):
+                    img1_path = feat_path
+            
+            if img0_path and img1_path:
+                filtered_matches_for_tracks.append({
+                    'image0': img0_path,
+                    'image1': img1_path,
+                    'matches': np.array(match_dict['matches']),
+                    'num_matches': match_dict['num_matches'],
+                    'match_confidence': match_dict.get('match_confidence', [])
+                })
+        
+        if len(filtered_matches_for_tracks) > 0:
+            matches_for_tracks = filtered_matches_for_tracks
+            tracks_output_filtered = output_dir / f"tracks_filtered_cell_{central_cell}.json"
+            use_filtered = True
+            print(f"   Using {len(matches_for_tracks)} filtered match pairs")
+        else:
+            print("   Warning: Could not map filtered matches to full paths, using unfiltered matches")
+    else:
+        print("   Using unfiltered matches for track computation...")
+        use_filtered = False
+    
     tracks_data = compute_tracks(
-        match_results['matches'], 
+        matches_for_tracks, 
         match_results['features'],
         max_track_length=max_overlap_count if max_overlap_count > 0 else None
     )
@@ -649,6 +727,39 @@ def main(min_overlap_threshold: float = 50.0):
     
     # Save tracks (with full feature information)
     tracks_output = output_dir / f"tracks_cell_{central_cell}.json"
+    if use_filtered and tracks_output_filtered:
+        # Save filtered tracks to separate file
+        tracks_output = tracks_output_filtered
+        print(f"   Saving filtered tracks to: {tracks_output}")
+        
+        # Also compute and save unfiltered tracks for comparison
+        print("   Also computing unfiltered tracks for comparison...")
+        tracks_data_unfiltered = compute_tracks(
+            match_results['matches'], 
+            match_results['features'],
+            max_track_length=max_overlap_count if max_overlap_count > 0 else None
+        )
+        tracks_output_unfiltered = output_dir / f"tracks_cell_{central_cell}.json"
+        tracks_json_unfiltered = {
+            'num_tracks': tracks_data_unfiltered['num_tracks'],
+            'total_features_in_tracks': tracks_data_unfiltered['total_features_in_tracks'],
+            'tracks': [
+                {
+                    'track_id': t['track_id'],
+                    'length': t['length'],
+                    'num_images': len(t['images']),
+                    'images': list(t['images']),
+                    'features': [(img, idx) for img, idx in t['features']]
+                }
+                for t in tracks_data_unfiltered['tracks']
+            ]
+        }
+        with open(tracks_output_unfiltered, 'w') as f:
+            json.dump(tracks_json_unfiltered, f, indent=2)
+        print(f"   Saved unfiltered tracks to: {tracks_output_unfiltered}")
+    else:
+        print(f"   Saving unfiltered tracks to: {tracks_output}")
+    
     tracks_json = {
         'num_tracks': tracks_data['num_tracks'],
         'total_features_in_tracks': tracks_data['total_features_in_tracks'],
@@ -669,19 +780,130 @@ def main(min_overlap_threshold: float = 50.0):
     
     # Create track length histogram
     histogram_output = output_dir / f"track_length_histogram_cell_{central_cell}.png"
-    plot_track_length_histogram(tracks_data, str(histogram_output))
+    # Use unfiltered tracks for the main histogram if filtering was used
+    if use_filtered and 'tracks_data_unfiltered' in locals():
+        plot_track_length_histogram(tracks_data_unfiltered, str(histogram_output))
+    else:
+        plot_track_length_histogram(tracks_data, str(histogram_output))
+    print(f"   Saved track length histogram to: {histogram_output}")
     
-    # Create track visualizations for 5 random tracks
-    print("\n   Creating track visualizations...")
-    from matcher.visualization import create_multiple_track_visualizations
+    # Create filtered track length histogram if filtering was used
+    if use_filtered and tracks_output_filtered and tracks_output_filtered.exists():
+        histogram_output_filtered = output_dir / f"track_length_histogram_filtered_cell_{central_cell}.png"
+        plot_track_length_histogram(tracks_data, str(histogram_output_filtered))  # tracks_data is filtered when use_filtered is True
+        print(f"   Saved filtered track length histogram to: {histogram_output_filtered}")
+    
+    # Determine which tracks file to use for main visualizations
+    # When filtering is enabled, use unfiltered tracks for main visualizations
+    # and filtered tracks for filtered visualizations
+    tracks_file_for_main_viz = tracks_output
+    if use_filtered and tracks_output_filtered:
+        # Use unfiltered tracks for main visualizations
+        tracks_file_for_main_viz = output_dir / f"tracks_cell_{central_cell}.json"
+    
+    # Create track visualizations for 5 random tracks (unfiltered)
+    print("\n   Creating track visualizations (unfiltered)...")
+    from matcher.visualization import create_multiple_track_visualizations, visualize_tracks_on_image_triplets
     create_multiple_track_visualizations(
-        tracks_file=str(tracks_output),
+        tracks_file=str(tracks_file_for_main_viz),
         features_file=str(features_cache_path),
         matches_file=str(matches_output_unfiltered),
-        image_dir=str(image_dir),
+        image_dir=str(quarter_res_dir),  # Use quarter-resolution image directory
         output_dir=str(output_dir / "visualization"),  # Save to outputs/visualization/
         num_tracks=5
     )
+    
+    # Create track visualizations on image triplets (unfiltered)
+    print("\n   Creating track visualizations on image triplets (unfiltered)...")
+    # Load features data
+    with open(features_cache_path, 'r') as f:
+        features_data = json.load(f)
+    
+    # Define triplets to visualize (as integers for the function)
+    triplets = [
+        (1, 2, 3),      # 0001, 0002, 0003
+        (51, 52, 53),   # 0051, 0052, 0053
+        (101, 102, 103), # 0101, 0102, 0103
+        (151, 152, 153)  # 0151, 0152, 0153
+    ]
+    
+    triplet_output_dir = output_dir / "visualize_tracks_on_images"
+    triplet_output_dir.mkdir(parents=True, exist_ok=True)
+    
+    for img1_num, img2_num, img3_num in triplets:
+        # Create output filename
+        output_filename = f"tracks_{img1_num:04d}_{img2_num:04d}_{img3_num:04d}.png"
+        output_path = triplet_output_dir / output_filename
+        
+        # Create visualization for all tracks
+        visualize_tracks_on_image_triplets(
+            image_dir=str(quarter_res_dir),
+            features_data=features_data,
+            tracks_file=str(tracks_file_for_main_viz),
+            img_nums=(img1_num, img2_num, img3_num),
+            output_path=str(output_path),
+            only_three_image_tracks=False
+        )
+        
+        # Also create visualization for three-image tracks only
+        output_filename_three = f"tracks_{img1_num:04d}_{img2_num:04d}_{img3_num:04d}_three_only.png"
+        output_path_three = triplet_output_dir / output_filename_three
+        
+        visualize_tracks_on_image_triplets(
+            image_dir=str(quarter_res_dir),
+            features_data=features_data,
+            tracks_file=str(tracks_file_for_main_viz),
+            img_nums=(img1_num, img2_num, img3_num),
+            output_path=str(output_path_three),
+            only_three_image_tracks=True
+        )
+    
+    # Create filtered track visualizations if epipolar filtering was used
+    if use_filtered and tracks_output_filtered and tracks_output_filtered.exists():
+        print("\n   Creating filtered track visualizations...")
+        
+        # Create filtered track visualizations for 5 random tracks
+        create_multiple_track_visualizations(
+            tracks_file=str(tracks_output_filtered),
+            features_file=str(features_cache_path),
+            matches_file=str(matches_output_filtered) if matches_output_filtered and matches_output_filtered.exists() else str(matches_output_unfiltered),
+            image_dir=str(quarter_res_dir),
+            output_dir=str(output_dir / "visualization" / "filtered"),  # Save to outputs/visualization/filtered/
+            num_tracks=5
+        )
+        
+        # Create filtered track visualizations on image triplets
+        print("\n   Creating filtered track visualizations on image triplets...")
+        filtered_triplet_output_dir = output_dir / "visualize_tracks_on_images" / "filtered"
+        filtered_triplet_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        for img1_num, img2_num, img3_num in triplets:
+            # Create output filename with _filtered suffix
+            output_filename = f"tracks_{img1_num:04d}_{img2_num:04d}_{img3_num:04d}_filtered.png"
+            output_path = filtered_triplet_output_dir / output_filename
+            
+            # Create visualization for all filtered tracks
+            visualize_tracks_on_image_triplets(
+                image_dir=str(quarter_res_dir),
+                features_data=features_data,
+                tracks_file=str(tracks_output_filtered),
+                img_nums=(img1_num, img2_num, img3_num),
+                output_path=str(output_path),
+                only_three_image_tracks=False
+            )
+            
+            # Also create visualization for three-image filtered tracks only
+            output_filename_three = f"tracks_{img1_num:04d}_{img2_num:04d}_{img3_num:04d}_filtered_three_only.png"
+            output_path_three = filtered_triplet_output_dir / output_filename_three
+            
+            visualize_tracks_on_image_triplets(
+                image_dir=str(quarter_res_dir),
+                features_data=features_data,
+                tracks_file=str(tracks_output_filtered),
+                img_nums=(img1_num, img2_num, img3_num),
+                output_path=str(output_path_three),
+                only_three_image_tracks=True
+            )
     
     # Step 8.5: Reconstruct point cloud from tracks (DISABLED FOR NOW)
     print("\n8.5. Point cloud reconstruction disabled for now")
@@ -786,7 +1008,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Tiepoint matcher with footprint overlap filtering')
     parser.add_argument('--min-overlap', type=float, default=50.0,
                        help='Minimum footprint overlap percentage to consider for matching (default: 50.0)')
+    parser.add_argument('--no-epipolar-filtering', action='store_true',
+                       help='Disable epipolar geometry filtering (default: filtering enabled)')
     args = parser.parse_args()
+    
+    enable_epipolar_filtering = not args.no_epipolar_filtering
     
     # Set up output directory for logs
     output_dir = Path("outputs")
@@ -825,7 +1051,7 @@ if __name__ == "__main__":
         sys.stderr = stderr_tee
         
         try:
-            main(min_overlap_threshold=args.min_overlap)
+            main(min_overlap_threshold=args.min_overlap, enable_epipolar_filtering=enable_epipolar_filtering)
         except Exception as e:
             import traceback
             error_msg = f"\nERROR: {str(e)}\n{traceback.format_exc()}\n"

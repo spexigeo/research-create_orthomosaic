@@ -48,7 +48,7 @@ def gps_to_local_utm(lat: float, lon: float, alt: float,
     return np.array([point_x - origin_x, point_y - origin_y, alt])
 
 
-def estimate_camera_intrinsics(image_width: int = 4000, image_height: int = 3000,
+def estimate_camera_intrinsics(image_width: int = 1000, image_height: int = 750,
                                sensor_width_mm: float = 13.2, focal_length_mm: float = 8.8) -> np.ndarray:
     """
     Estimate camera intrinsics matrix.
@@ -160,8 +160,8 @@ def validate_matches_epipolar(
     matches: List[Dict],
     features: Dict,
     camera_poses: Dict[str, Dict],
-    image_width: int = 4000,
-    image_height: int = 3000,
+    image_width: int = 1000,
+    image_height: int = 750,
     threshold: float = 2.0,
     origin_lat: Optional[float] = None,
     origin_lon: Optional[float] = None
@@ -290,3 +290,213 @@ def validate_matches_epipolar(
     }
     
     return filtered_matches, stats
+
+
+def filter_matches_epipolar_robust(
+    matches_file: str,
+    features_file: str,
+    output_file: str,
+    image_width: int = 1000,
+    image_height: int = 750,
+    ransac_threshold: float = 0.5,
+    confidence: float = 0.999,
+    max_iters: int = 2000
+) -> Dict:
+    """
+    Filter matches using robust epipolar geometry estimation (RANSAC).
+    
+    For each image pair in matches_file, compute fundamental matrix using RANSAC
+    and keep only inlier matches.
+    
+    Args:
+        matches_file: Path to unfiltered matches JSON file
+        features_file: Path to features JSON file
+        output_file: Path to save filtered matches JSON file
+        image_width: Image width in pixels
+        image_height: Image height in pixels
+        ransac_threshold: RANSAC threshold in pixels (default: 1.0)
+        confidence: RANSAC confidence (default: 0.999)
+        max_iters: Maximum RANSAC iterations (default: 2000)
+    
+    Returns:
+        Dictionary with filtering statistics
+    """
+    import json
+    
+    # Load matches and features
+    with open(matches_file, 'r') as f:
+        matches_data = json.load(f)
+    
+    with open(features_file, 'r') as f:
+        features_data = json.load(f)
+    
+    # Estimate camera intrinsics
+    K = estimate_camera_intrinsics(image_width, image_height)
+    
+    filtered_matches = []
+    total_matches_before = 0
+    total_matches_after = 0
+    pairs_processed = 0
+    pairs_with_inliers = 0
+    
+    print(f"Filtering matches using robust epipolar geometry (RANSAC)...")
+    print(f"  RANSAC threshold: {ransac_threshold} pixels")
+    print(f"  Confidence: {confidence}")
+    print(f"  Max iterations: {max_iters}")
+    
+    for match_dict in matches_data:
+        img0_path = match_dict['image0']
+        img1_path = match_dict['image1']
+        match_indices = np.array(match_dict['matches'])
+        
+        # Get image names for feature lookup
+        img0_name = Path(img0_path).name
+        img1_name = Path(img1_path).name
+        
+        # Try to find features (handle both with and without quarter_ prefix)
+        feat0 = None
+        feat1 = None
+        
+        # Try exact match first
+        if img0_path in features_data:
+            feat0 = features_data[img0_path]
+        elif img0_name in features_data:
+            feat0 = features_data[img0_name]
+        else:
+            # Try without quarter_ prefix
+            img0_name_clean = img0_name.replace('quarter_', '')
+            for key in features_data.keys():
+                if key.endswith(img0_name_clean):
+                    feat0 = features_data[key]
+                    break
+        
+        if img1_path in features_data:
+            feat1 = features_data[img1_path]
+        elif img1_name in features_data:
+            feat1 = features_data[img1_name]
+        else:
+            img1_name_clean = img1_name.replace('quarter_', '')
+            for key in features_data.keys():
+                if key.endswith(img1_name_clean):
+                    feat1 = features_data[key]
+                    break
+        
+        if feat0 is None or feat1 is None:
+            # Skip if features not found
+            filtered_matches.append(match_dict)
+            continue
+        
+        # Get keypoints
+        if isinstance(feat0, dict):
+            keypoints0 = np.array(feat0.get('keypoints', []))
+        else:
+            keypoints0 = np.array(feat0.get('keypoints', []))
+        
+        if isinstance(feat1, dict):
+            keypoints1 = np.array(feat1.get('keypoints', []))
+        else:
+            keypoints1 = np.array(feat1.get('keypoints', []))
+        
+        if len(keypoints0) == 0 or len(keypoints1) == 0:
+            filtered_matches.append(match_dict)
+            continue
+        
+        # Extract matched points
+        if len(match_indices) < 8:
+            # Need at least 8 points for fundamental matrix estimation
+            filtered_matches.append(match_dict)
+            continue
+        
+        pts0 = []
+        pts1 = []
+        
+        for match_idx in match_indices:
+            idx0, idx1 = int(match_idx[0]), int(match_idx[1])
+            if idx0 < len(keypoints0) and idx1 < len(keypoints1):
+                pts0.append(keypoints0[idx0])
+                pts1.append(keypoints1[idx1])
+        
+        if len(pts0) < 8:
+            filtered_matches.append(match_dict)
+            continue
+        
+        pts0 = np.array(pts0, dtype=np.float32)
+        pts1 = np.array(pts1, dtype=np.float32)
+        
+        total_matches_before += len(pts0)
+        pairs_processed += 1
+        
+        # Compute fundamental matrix using RANSAC
+        try:
+            F, mask = cv2.findFundamentalMat(
+                pts0, pts1,
+                method=cv2.FM_RANSAC,
+                ransacReprojThreshold=ransac_threshold,
+                confidence=confidence,
+                maxIters=max_iters
+            )
+            
+            if F is None or mask is None:
+                # RANSAC failed, keep original matches
+                filtered_matches.append(match_dict)
+                continue
+            
+            # Count inliers
+            inlier_mask = mask.ravel() == 1
+            num_inliers = np.sum(inlier_mask)
+            
+            # Require at least 8 inliers AND at least 50% of matches to be inliers
+            min_inlier_ratio = 0.5
+            if num_inliers < 8 or (num_inliers / len(pts0)) < min_inlier_ratio:
+                # Too few inliers or too low inlier ratio, skip this pair
+                continue
+            
+            # Filter matches to keep only inliers
+            inlier_indices = match_indices[inlier_mask]
+            
+            filtered_match_dict = match_dict.copy()
+            filtered_match_dict['matches'] = inlier_indices.tolist()
+            filtered_match_dict['num_matches'] = len(inlier_indices)
+            
+            # Filter match_confidence if present
+            if 'match_confidence' in match_dict and match_dict['match_confidence']:
+                if isinstance(match_dict['match_confidence'], list):
+                    filtered_match_dict['match_confidence'] = [
+                        match_dict['match_confidence'][i] 
+                        for i in range(len(match_dict['match_confidence'])) 
+                        if inlier_mask[i]
+                    ]
+                else:
+                    # It's a numpy array
+                    filtered_match_dict['match_confidence'] = np.array(match_dict['match_confidence'])[inlier_mask].tolist()
+            
+            filtered_matches.append(filtered_match_dict)
+            total_matches_after += num_inliers
+            pairs_with_inliers += 1
+            
+        except Exception as e:
+            # If RANSAC fails, keep original matches
+            print(f"Warning: RANSAC failed for {img0_name} <-> {img1_name}: {e}")
+            filtered_matches.append(match_dict)
+    
+    # Save filtered matches
+    with open(output_file, 'w') as f:
+        json.dump(filtered_matches, f, indent=2)
+    
+    stats = {
+        'total_pairs': len(matches_data),
+        'pairs_processed': pairs_processed,
+        'pairs_with_inliers': pairs_with_inliers,
+        'total_matches_before': total_matches_before,
+        'total_matches_after': total_matches_after,
+        'filtering_rate': total_matches_after / total_matches_before if total_matches_before > 0 else 0.0,
+        'pairs_kept': len(filtered_matches)
+    }
+    
+    print(f"  Processed {pairs_processed} pairs")
+    print(f"  Pairs with inliers: {pairs_with_inliers}")
+    print(f"  Total matches before: {total_matches_before}")
+    print(f"  Total matches after: {total_matches_after}")
+    print(f"  Filtering rate: {stats['filtering_rate']:.2%}")
+    
+    return stats
