@@ -9,6 +9,7 @@ from PIL.ExifTags import TAGS, GPSTAGS
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 import sys
+from .utils import calculate_fov_from_focal_length
 
 
 def get_decimal_from_dms(dms, ref):
@@ -279,54 +280,37 @@ def compute_footprint_from_exif(
         Array of 4 corner points in local meters (4, 3) or None if calculation fails
     """
     try:
-        # Calculate FOV from focal length and sensor dimensions
-        fov_h = calculate_fov_from_focal_length(focal_length_mm, sensor_width_mm)
-        fov_v = calculate_fov_from_focal_length(focal_length_mm, sensor_height_mm)
+        # Use compute_footprint_polygon from utils instead of Footprint class
+        from .utils import compute_footprint_polygon
         
-        # Get camera parameters
-        altitude = gps['altitude']
-        latitude = gps['latitude']
-        longitude = gps['longitude']
-        
-        # Get orientation (use gimbal angles)
-        # Note: Use flight_yaw if gimbal_yaw is 0 (gimbal may be locked to 0)
-        roll = dji_orientation.get('gimbal_roll', 0.0)
-        pitch = dji_orientation.get('gimbal_pitch', -90.0)  # Default to nadir
-        yaw = dji_orientation.get('gimbal_yaw', 0.0)
-        if abs(yaw) < 0.1:  # If gimbal_yaw is essentially 0, use flight_yaw
-            yaw = dji_orientation.get('flight_yaw', 0.0)
-        
-        # Calculate footprint using Footprint class
-        footprint_feature = Footprint.get_bounding_polygon(
-            fov_h=fov_h,
-            fov_v=fov_v,
-            altitude=altitude,
-            roll=roll,
-            pitch=pitch,
-            yaw=yaw,
-            latitude=latitude,
-            longitude=longitude
+        # Calculate footprint using compute_footprint_polygon
+        footprint_poly, _ = compute_footprint_polygon(
+            gps=gps,
+            dji_orientation=dji_orientation,
+            focal_length_mm=focal_length_mm,
+            sensor_width_mm=sensor_width_mm,
+            sensor_height_mm=sensor_height_mm,
+            origin_lat=origin_lat,
+            origin_lon=origin_lon
         )
         
-        # Extract polygon coordinates from GeoJSON
-        if footprint_feature.geometry is None:
+        if footprint_poly is None:
             return None
         
-        polygon_coords = footprint_feature.geometry.coordinates[0]
+        # Extract polygon coordinates
+        from shapely.geometry import Polygon
+        if isinstance(footprint_poly, Polygon):
+            polygon_coords = list(footprint_poly.exterior.coords[:-1])  # Exclude closing point
+        else:
+            polygon_coords = list(footprint_poly) if hasattr(footprint_poly, '__iter__') else []
         
-        # Convert lat/lon to local meters (relative to origin)
+        # Convert polygon coordinates to 3D array (x, y, z) where z is altitude
+        # The polygon_coords are already in local meters (x, y), so we just need to add z
         corners_3d = []
-        for lon, lat in polygon_coords:
-            # Skip the closing point if it's a duplicate
-            if len(corners_3d) > 0 and len(corners_3d) < 4:
-                # Convert to local meters
-                lat_diff = lat - origin_lat
-                lon_diff = lon - origin_lon
-                
-                x = lon_diff * 111000.0 * math.cos(math.radians(origin_lat))
-                y = lat_diff * 111000.0
+        for coord in polygon_coords:
+            if len(coord) >= 2:
+                x, y = coord[0], coord[1]
                 z = 0.0  # Ground plane
-                
                 corners_3d.append([x, y, z])
         
         # Ensure we have exactly 4 corners

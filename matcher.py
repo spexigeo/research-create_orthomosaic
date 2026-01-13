@@ -73,7 +73,7 @@ def load_footprint_overlaps(overlaps_file: str = "outputs/footprint_overlaps.jso
         return {}
 
 
-def main(min_overlap_threshold: float = 50.0, enable_epipolar_filtering: bool = True, mode: str = 'ortho', resolution: float = 1.0):
+def main(min_overlap_threshold: float = 50.0, enable_epipolar_filtering: bool = True, mode: str = 'ortho', resolution: float = 1.0, cell_ids_file: Optional[str] = None, output_dir_override: Optional[str] = None, image_dir_override: Optional[str] = None):
     """
     Main matching pipeline.
     
@@ -84,16 +84,26 @@ def main(min_overlap_threshold: float = 50.0, enable_epipolar_filtering: bool = 
         resolution: Image resolution scale factor (default: 1.0 for full resolution). 
                     Use 0.125, 0.25, or 0.5 for downsampled versions.
     """
-    # Paths based on mode
-    if mode == 'hybrid':
+    # Paths based on mode (can be overridden)
+    if image_dir_override:
+        image_dir = Path(image_dir_override)
+    elif mode == 'hybrid':
         image_dir = Path("/Users/mauriciohessflores/Documents/Code/Data/hybrid_flight_plan/images")
+    else:  # ortho mode
+        image_dir = Path("/Users/mauriciohessflores/Documents/Code/MyCode/research-qualicum_beach_gcp_analysis/input/images")
+    
+    if output_dir_override:
+        output_dir = Path(output_dir_override)
+    elif mode == 'hybrid':
         output_dir = Path("outputs_hybrid")
+    else:  # ortho mode
+        output_dir = Path("outputs")
+    
+    if mode == 'hybrid':
         print("=" * 60)
         print("Tiepoint Matcher - Hybrid Mode (Nadir + Oblique)")
         print("=" * 60)
-    else:  # ortho mode
-        image_dir = Path("/Users/mauriciohessflores/Documents/Code/MyCode/research-qualicum_beach_gcp_analysis/input/images")
-        output_dir = Path("outputs")
+    else:
         print("=" * 60)
         print("Tiepoint Matcher Test - Qualicum Beach Data (Ortho Mode)")
         print("=" * 60)
@@ -107,15 +117,15 @@ def main(min_overlap_threshold: float = 50.0, enable_epipolar_filtering: bool = 
     # Step 1: Get all H3 cells from images
     print("\n1. Parsing image filenames to extract H3 cells...")
     cell_to_images = get_cell_images(str(image_dir))
-    cell_ids = list(cell_to_images.keys())
-    print(f"   Found {len(cell_ids)} H3 cells:")
-    for cell_id in sorted(cell_ids):
+    all_cell_ids = list(cell_to_images.keys())
+    print(f"   Found {len(all_cell_ids)} H3 cells:")
+    for cell_id in sorted(all_cell_ids):
         num_images = len(cell_to_images[cell_id])
         print(f"     {cell_id}: {num_images} images")
     
     # Save cell analysis
     cell_analysis = {
-        'total_cells': len(cell_ids),
+        'total_cells': len(all_cell_ids),
         'cells': {cell_id: {'num_images': len(images)} 
                  for cell_id, images in cell_to_images.items()}
     }
@@ -124,9 +134,93 @@ def main(min_overlap_threshold: float = 50.0, enable_epipolar_filtering: bool = 
         json.dump(cell_analysis, f, indent=2)
     print(f"   Saved cell analysis to: {cell_analysis_path}")
     
+    # Determine which cells to process
+    if cell_ids_file and Path(cell_ids_file).exists():
+        # Load cell IDs from file
+        with open(cell_ids_file, 'r') as f:
+            cell_ids_data = json.load(f)
+        if isinstance(cell_ids_data, list):
+            cell_ids = cell_ids_data
+        elif isinstance(cell_ids_data, dict) and 'cell_ids' in cell_ids_data:
+            cell_ids = cell_ids_data['cell_ids']
+        else:
+            cell_ids = [cell_ids_data] if isinstance(cell_ids_data, str) else all_cell_ids
+        
+        # Filter to only cells that exist
+        cell_ids = [cid for cid in cell_ids if cid in cell_to_images]
+        print(f"   Processing {len(cell_ids)} cells from file: {cell_ids}")
+    else:
+        # Use original single-cell logic
+        cell_ids = None
+    
+    # Check if we should use multi-cell processing
+    if cell_ids and len(cell_ids) > 1:
+        # Multi-cell processing
+        print("\n" + "=" * 60)
+        print("MULTI-CELL MODE: Processing intra-cell and inter-cell")
+        print("=" * 60)
+        
+        from matcher.multi_cell_processor import process_multi_cell
+        
+        # Get camera parameters from defaults (can be made configurable)
+        focal_length_mm = 8.8
+        sensor_width_mm = 13.2
+        sensor_height_mm = 9.9
+        max_features = 200
+        
+        graph = process_multi_cell(
+            cell_ids=cell_ids,
+            image_dir=image_dir,
+            output_dir=output_dir,
+            min_overlap_threshold=min_overlap_threshold,
+            enable_epipolar_filtering=enable_epipolar_filtering,
+            max_features=max_features,
+            resolution=resolution,
+            focal_length_mm=focal_length_mm,
+            sensor_width_mm=sensor_width_mm,
+            sensor_height_mm=sensor_height_mm,
+            mode=mode
+        )
+        
+        print("\n" + "=" * 60)
+        print("Multi-cell processing complete!")
+        print("=" * 60)
+        print(f"  Tiepoint graph saved to: {output_dir / 'tiepoint_graph.json'}")
+        print(f"  Linked tracks saved to: {output_dir / 'linked_tracks.json'}")
+        return
+    
+    # Single-cell processing (original logic)
     # Step 2: Find central cell
     print("\n2. Finding central cell (completely surrounded by 6 neighbors)...")
-    central_cell = find_central_cell(cell_ids)
+    if cell_ids and len(cell_ids) == 1:
+        central_cell = cell_ids[0]
+        central_cell_info = {
+            'central_cell': central_cell,
+            'is_central': False,
+            'note': 'Single cell specified'
+        }
+    else:
+        central_cell = find_central_cell(all_cell_ids)
+        
+        if central_cell is None:
+            print("   WARNING: No central cell found. Using first cell for testing.")
+            central_cell = all_cell_ids[0]
+            central_cell_info = {
+                'central_cell': central_cell,
+                'is_central': False,
+                'note': 'No cell with 6 neighbors found, using first cell'
+            }
+        else:
+            print(f"   Found central cell: {central_cell}")
+            if HAS_H3:
+                neighbors = list(h3.grid_ring(central_cell, k=1))
+            else:
+                neighbors = []
+            central_cell_info = {
+                'central_cell': central_cell,
+                'is_central': True,
+                'neighbors': neighbors
+            }
     
     if central_cell is None:
         print("   WARNING: No central cell found. Using first cell for testing.")
@@ -1352,6 +1446,12 @@ if __name__ == "__main__":
                        help='Minimum footprint overlap percentage to consider for matching (default: 50.0)')
     parser.add_argument('--no-epipolar-filtering', action='store_true',
                        help='Disable epipolar geometry filtering (default: filtering enabled)')
+    parser.add_argument('--cell-ids-file', type=str, default=None,
+                       help='Path to JSON file with list of cell IDs to process. If multiple cells, enables multi-cell processing with intra and inter-cell matching.')
+    parser.add_argument('--output-dir', type=str, default=None,
+                       help='Override output directory (default: outputs/ for ortho, outputs_hybrid/ for hybrid)')
+    parser.add_argument('--image-dir', type=str, default=None,
+                       help='Override image directory (default: based on mode)')
     args = parser.parse_args()
     
     enable_epipolar_filtering = not args.no_epipolar_filtering
@@ -1397,7 +1497,7 @@ if __name__ == "__main__":
         sys.stderr = stderr_tee
         
         try:
-            main(min_overlap_threshold=args.min_overlap, enable_epipolar_filtering=enable_epipolar_filtering, mode=mode, resolution=args.resolution)
+            main(min_overlap_threshold=args.min_overlap, enable_epipolar_filtering=enable_epipolar_filtering, mode=mode, resolution=args.resolution, cell_ids_file=args.cell_ids_file, output_dir_override=args.output_dir, image_dir_override=args.image_dir)
         except Exception as e:
             import traceback
             error_msg = f"\nERROR: {str(e)}\n{traceback.format_exc()}\n"

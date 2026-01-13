@@ -20,13 +20,14 @@ class LightGlueMatcher:
     LightGlue-based matcher for finding tiepoints within and across H3 cells.
     """
     
-    def __init__(self, extractor_type: str = 'superpoint', device: Optional[str] = None,
+    def __init__(self, extractor_type: str = None, device: Optional[str] = None,
                  max_features_per_image: Optional[int] = None):
         """
         Initialize the LightGlue matcher.
         
         Args:
-            extractor_type: Type of feature extractor ('superpoint', 'disk', 'sift', 'aliked')
+            extractor_type: Type of feature extractor ('superpoint', 'disk', 'sift', 'aliked').
+                           If None, will try ALIKED first, then SuperPoint, then DISK, then SIFT.
             device: Device to use ('cuda', 'cpu', or None for auto)
             max_features_per_image: Maximum number of features to keep per image (None = no limit)
         """
@@ -42,22 +43,47 @@ class LightGlueMatcher:
         self.device = torch.device(device)
         self.max_features_per_image = max_features_per_image
         
-        # Initialize extractor
-        if extractor_type == 'superpoint':
-            self.extractor = SuperPoint(max_num_keypoints=2048).eval().to(self.device)
-        elif extractor_type == 'disk':
-            self.extractor = DISK(max_num_keypoints=2048).eval().to(self.device)
-        elif extractor_type == 'sift':
-            self.extractor = SIFT(max_num_keypoints=2048).eval().to(self.device)
-        elif extractor_type == 'aliked':
-            self.extractor = ALIKED(max_num_keypoints=2048).eval().to(self.device)
+        # Auto-select extractor if not specified: prefer ALIKED, then SuperPoint
+        if extractor_type is None:
+            # Try ALIKED first
+            try:
+                self.extractor = ALIKED(max_num_keypoints=2048).eval().to(self.device)
+                extractor_type = 'aliked'
+                print(f"Using ALIKED feature extractor")
+            except Exception:
+                # Fall back to SuperPoint
+                try:
+                    self.extractor = SuperPoint(max_num_keypoints=2048).eval().to(self.device)
+                    extractor_type = 'superpoint'
+                    print(f"Using SuperPoint feature extractor (ALIKED not available)")
+                except Exception:
+                    # Fall back to DISK
+                    try:
+                        self.extractor = DISK(max_num_keypoints=2048).eval().to(self.device)
+                        extractor_type = 'disk'
+                        print(f"Using DISK feature extractor (ALIKED and SuperPoint not available)")
+                    except Exception:
+                        # Last resort: SIFT
+                        self.extractor = SIFT(max_num_keypoints=2048).eval().to(self.device)
+                        extractor_type = 'sift'
+                        print(f"Using SIFT feature extractor (other extractors not available)")
         else:
-            raise ValueError(f"Unknown extractor type: {extractor_type}")
+            # Use specified extractor
+            if extractor_type == 'superpoint':
+                self.extractor = SuperPoint(max_num_keypoints=2048).eval().to(self.device)
+            elif extractor_type == 'disk':
+                self.extractor = DISK(max_num_keypoints=2048).eval().to(self.device)
+            elif extractor_type == 'sift':
+                self.extractor = SIFT(max_num_keypoints=2048).eval().to(self.device)
+            elif extractor_type == 'aliked':
+                self.extractor = ALIKED(max_num_keypoints=2048).eval().to(self.device)
+            else:
+                raise ValueError(f"Unknown extractor type: {extractor_type}")
+        
+        self.extractor_type = extractor_type
         
         # Initialize matcher
         self.matcher = LightGlue(features=extractor_type).eval().to(self.device)
-        
-        self.extractor_type = extractor_type
     
     def extract_features(self, image_path: str) -> Dict:
         """
@@ -70,8 +96,7 @@ class LightGlueMatcher:
             Dictionary with keys: 'keypoints', 'descriptors', 'scores', 
             'keypoints_tensor', 'descriptors_tensor', 'scores_tensor', 'image_tensor'
         """
-        # Load image - SuperPoint expects grayscale (1 channel)
-        # For SuperPoint, load as grayscale directly
+        # Load image - SuperPoint expects grayscale (1 channel), others expect RGB
         if self.extractor_type == 'superpoint':
             # Load image and convert to grayscale
             pil_image = Image.open(image_path).convert('L')  # Convert to grayscale
@@ -82,8 +107,11 @@ class LightGlueMatcher:
                 raise ValueError(f"Expected 1 channel for SuperPoint, got {image.shape[1]}. Shape: {image.shape}")
             image_tensor = image.to(self.device)
         else:
-            # For other extractors, use load_image (returns RGB)
+            # For other extractors (ALIKED, DISK, SIFT), use load_image (returns RGB)
             image = load_image(image_path)
+            # Ensure image has batch dimension [1, C, H, W]
+            if image.ndim == 3:
+                image = image.unsqueeze(0)  # Add batch dimension if missing
             image_tensor = image.to(self.device)
         
         with torch.no_grad():
