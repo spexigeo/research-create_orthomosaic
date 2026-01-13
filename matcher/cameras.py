@@ -526,6 +526,50 @@ def create_polygon_outline(
     return np.array(vertices), faces
 
 
+def create_sphere(center: np.ndarray, radius: float, num_segments: int = 16) -> Tuple[np.ndarray, List[List[int]]]:
+    """
+    Create a sphere mesh for PLY export.
+    
+    Args:
+        center: Center point of sphere (3D)
+        radius: Radius of sphere
+        num_segments: Number of segments for sphere (higher = smoother)
+    
+    Returns:
+        Tuple of (vertices, faces) where vertices is (N, 3) array and faces is list of triangle indices
+    """
+    vertices = []
+    faces = []
+    
+    # Generate sphere vertices using spherical coordinates
+    for i in range(num_segments + 1):  # Latitude (theta)
+        theta = math.pi * i / num_segments  # 0 to pi
+        for j in range(num_segments + 1):  # Longitude (phi)
+            phi = 2 * math.pi * j / num_segments  # 0 to 2*pi
+            
+            # Convert to Cartesian coordinates
+            x = radius * math.sin(theta) * math.cos(phi)
+            y = radius * math.sin(theta) * math.sin(phi)
+            z = radius * math.cos(theta)
+            
+            vertices.append([center[0] + x, center[1] + y, center[2] + z])
+    
+    # Generate faces (triangles)
+    for i in range(num_segments):
+        for j in range(num_segments):
+            # Current quad indices
+            v1 = i * (num_segments + 1) + j
+            v2 = i * (num_segments + 1) + (j + 1)
+            v3 = (i + 1) * (num_segments + 1) + (j + 1)
+            v4 = (i + 1) * (num_segments + 1) + j
+            
+            # Two triangles per quad
+            faces.append([v1, v2, v3])
+            faces.append([v1, v3, v4])
+    
+    return np.array(vertices), faces
+
+
 def create_arrow(start: np.ndarray, direction: np.ndarray, length: float, 
                  shaft_radius: float = 0.1, head_length: float = 0.3, 
                  head_radius: float = 0.2, num_segments: int = 8) -> Tuple[np.ndarray, List[List[int]]]:
@@ -804,8 +848,16 @@ def export_camera_poses_to_ply(
         if pose.get('dji_orientation'):
             from .dji_exif_parser import get_camera_rotation_from_dji_orientation
             R = get_camera_rotation_from_dji_orientation(pose['dji_orientation'])
-            # Camera Z-axis (forward) in world coordinates
-            camera_direction = R @ np.array([0, 0, 1])
+            # R is world-to-camera, so R^T is camera-to-world
+            # Camera Z-axis (forward, into image) in camera coordinates is [0, 0, 1]
+            # Transform to world coordinates: R^T @ [0, 0, 1]
+            # For all cameras looking at ground, this should point downward (negative Z in world)
+            camera_direction = R.T @ np.array([0, 0, 1])
+            
+            # Ensure direction points downward (toward ground plane at z=0)
+            # If Z component is positive, the direction is pointing upward, so negate it
+            if camera_direction[2] > 0:
+                camera_direction = -camera_direction
         else:
             # Default: point down (nadir)
             camera_direction = np.array([0, 0, -1])

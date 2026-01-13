@@ -546,13 +546,17 @@ def visualize_tracks_on_image_triplets(image_dir: str, features_data: dict, trac
     img2_pattern = f"_{img2_num:04d}.jpg"
     img3_pattern = f"_{img3_num:04d}.jpg"
     
-    for img_file in image_dir_path.glob('quarter_*.jpg'):
-        if img1_pattern in img_file.name:
-            img1_path = img_file
-        elif img2_pattern in img_file.name:
-            img2_path = img_file
-        elif img3_pattern in img_file.name:
-            img3_path = img_file
+    # Try quarter-resolution images first, then full-resolution
+    for pattern in ['quarter_*.jpg', '*.jpg']:
+        for img_file in image_dir_path.glob(pattern):
+            if img1_pattern in img_file.name:
+                img1_path = img_file
+            elif img2_pattern in img_file.name:
+                img2_path = img_file
+            elif img3_pattern in img_file.name:
+                img3_path = img_file
+        if all([img1_path, img2_path, img3_path]):
+            break
     
     if not all([img1_path, img2_path, img3_path]):
         print(f"Warning: Could not find all three images for {img_nums}")
@@ -608,22 +612,48 @@ def visualize_tracks_on_image_triplets(image_dir: str, features_data: dict, trac
     img2_name_clean = img2_path.name.replace('quarter_', '')
     img3_name_clean = img3_path.name.replace('quarter_', '')
     
+    # Also try matching with full paths
+    img1_full_name = str(img1_path)
+    img2_full_name = str(img2_path)
+    img3_full_name = str(img3_path)
+    
     for track in tracks:
         track_features = track.get('features', [])
         # Map track features to our image indices (only for features in our 3 images)
         mapped_track = []
         for img_name, feat_idx in track_features:
-            # Normalize image name (handle with/without quarter_ prefix)
+            # Normalize image name (handle with/without quarter_ prefix and path variations)
             img_name_clean = img_name.replace('quarter_', '')
-            if img_name_clean == img1_name_clean or img_name == img1_feat_name:
+            img_name_base = Path(img_name).name if '/' in img_name or '\\' in img_name else img_name
+            
+            # Try multiple matching strategies
+            matches_img1 = (img_name_clean == img1_name_clean or 
+                          img_name == img1_feat_name or
+                          img_name_base == img1_name_clean or
+                          img_name == img1_full_name or
+                          Path(img_name).name == img1_name_clean)
+            
+            matches_img2 = (img_name_clean == img2_name_clean or 
+                          img_name == img2_feat_name or
+                          img_name_base == img2_name_clean or
+                          img_name == img2_full_name or
+                          Path(img_name).name == img2_name_clean)
+            
+            matches_img3 = (img_name_clean == img3_name_clean or 
+                          img_name == img3_feat_name or
+                          img_name_base == img3_name_clean or
+                          img_name == img3_full_name or
+                          Path(img_name).name == img3_name_clean)
+            
+            if matches_img1:
                 # Validate feature index
                 if feat_idx < len(kpts1):
                     mapped_track.append((0, feat_idx))  # Image 0
-            elif img_name_clean == img2_name_clean or img_name == img2_feat_name:
+            elif matches_img2:
                 # Validate feature index
                 if feat_idx < len(kpts2):
                     mapped_track.append((1, feat_idx))  # Image 1
-            elif img_name_clean == img3_name_clean or img_name == img3_feat_name:
+            elif matches_img3:
                 # Validate feature index
                 if feat_idx < len(kpts3):
                     mapped_track.append((2, feat_idx))  # Image 2
@@ -1112,7 +1142,10 @@ def visualize_footprints_2d(
     sensor_width_mm: float = 13.2,
     sensor_height_mm: float = 9.9,
     show_image_numbers: bool = True,
-    alpha: float = 0.3
+    alpha: float = 0.3,
+    filter_pitch: Optional[float] = None,
+    filter_pitch_tolerance: float = 1.0,
+    filter_oblique_only: bool = False
 ):
     """
     Create a 2D visualization of image footprints.
@@ -1125,6 +1158,9 @@ def visualize_footprints_2d(
         sensor_height_mm: Sensor height in millimeters
         show_image_numbers: Whether to show image numbers on footprints
         alpha: Transparency of footprint polygons (0-1)
+        filter_pitch: If provided, only show footprints with this pitch angle (degrees)
+        filter_pitch_tolerance: Tolerance for pitch filtering (degrees)
+        filter_oblique_only: If True, only show oblique footprints (exclude nadir, pitch != -90°)
     """
     import matplotlib.patches as patches
     from matcher.utils import compute_footprint_polygon
@@ -1150,8 +1186,23 @@ def visualize_footprints_2d(
     image_names = []
     
     for pose in poses:
-        if not pose.get('gps') or not pose.get('dji_orientation'):
+        if not pose.get('gps'):
             continue
+        # Use dji_orientation if available, otherwise use default nadir orientation
+        if not pose.get('dji_orientation'):
+            # Default to nadir for images without orientation data
+            pose['dji_orientation'] = {'gimbal_pitch': -90.0, 'gimbal_roll': 0.0, 'gimbal_yaw': 0.0}
+        
+        # Filter by pitch if requested
+        pitch = pose['dji_orientation'].get('gimbal_pitch', -90.0)
+        if filter_oblique_only:
+            # Only show oblique (exclude nadir, pitch != -90°)
+            if abs(pitch + 90.0) < filter_pitch_tolerance:
+                continue
+        elif filter_pitch is not None:
+            # Filter to specific pitch angle
+            if abs(pitch - filter_pitch) > filter_pitch_tolerance:
+                continue
         
         footprint_poly, _ = compute_footprint_polygon(
             gps=pose['gps'],
@@ -1172,7 +1223,11 @@ def visualize_footprints_2d(
                 else:
                     corners = np.array(footprint_poly)
                 
-                if len(corners) >= 4:
+                # Accept footprints with 3 or more corners (trapezoids for oblique cameras)
+                if len(corners) >= 3:
+                    # If we have exactly 3 corners, duplicate the last one to make 4
+                    if len(corners) == 3:
+                        corners = np.vstack([corners, corners[-1]])
                     footprints.append(corners[:4])
                     image_names.append(pose['image_name'])
             except Exception as e:
@@ -1206,7 +1261,15 @@ def visualize_footprints_2d(
     ax.grid(True, alpha=0.3)
     ax.set_xlabel('X (meters, relative to origin)', fontsize=12)
     ax.set_ylabel('Y (meters, relative to origin)', fontsize=12)
-    ax.set_title('Image Footprints (2D View)\nShowing overlap and rotation', fontsize=14, fontweight='bold')
+    
+    # Set title based on filter
+    if filter_oblique_only:
+        title = 'Oblique Image Footprints (2D View)\nTrapezoidal footprints for oblique angles'
+    elif filter_pitch is not None:
+        title = f'Image Footprints at {filter_pitch}° Pitch (2D View)'
+    else:
+        title = 'Image Footprints (2D View)\nShowing overlap and rotation'
+    ax.set_title(title, fontsize=14, fontweight='bold')
     
     # Draw footprints with color gradient
     num_footprints = len(footprints)

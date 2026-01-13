@@ -282,15 +282,17 @@ def robust_reconstruct_with_bundle_adjustment(
             if feat_dict is None:
                 continue
             
-            keypoints = feat_dict['keypoints'] * 4.0  # Scale to full resolution
+            # Don't scale - features are already at the correct resolution
+            # (quarter_res_width/height are set based on actual processed image resolution)
+            keypoints = feat_dict['keypoints']
             if feat_idx >= len(keypoints):
                 continue
             
             pt = keypoints[feat_idx]
-            P, R, t = camera_matrices[img_name_clean]
+            P, R, t = camera_matrices[camera_matrix_key]
             
             views.append({
-                'image_name': img_name_clean,
+                'image_name': camera_matrix_key,
                 'point': pt,
                 'P': P,
                 'R': R,
@@ -359,6 +361,7 @@ def robust_reconstruct_with_bundle_adjustment(
     # Step 4: Bundle adjustment
     if use_bundle_adjustment and len(observations) > 0:
         print("  Step 4: Running bundle adjustment...")
+        print(f"    Input: {len(camera_poses)} cameras, {len(points_3d)} 3D points, {len(observations)} observations")
         refined_poses, refined_points, ba_stats = bundle_adjust(
             camera_poses,
             points_3d,
@@ -371,9 +374,19 @@ def robust_reconstruct_with_bundle_adjustment(
         camera_poses = refined_poses
         points_3d = refined_points
         
-        print(f"    Bundle adjustment: RMSE = {ba_stats.get('final_cost', 0):.2f} pixels")
+        if ba_stats.get('status') == 'success':
+            print(f"    Bundle adjustment completed successfully")
+            print(f"    Summary: Initial RMSE = {ba_stats.get('initial_rmse', 0):.4f} pixels, "
+                  f"Final RMSE = {ba_stats.get('final_rmse', 0):.4f} pixels, "
+                  f"Improvement = {ba_stats.get('improvement_percent', 0):.2f}%")
+        else:
+            print(f"    Bundle adjustment status: {ba_stats.get('status', 'unknown')}")
     else:
         ba_stats = {'status': 'skipped'}
+        if not use_bundle_adjustment:
+            print("  Step 4: Bundle adjustment skipped (disabled)")
+        elif len(observations) == 0:
+            print("  Step 4: Bundle adjustment skipped (no observations)")
     
     # Build point cloud output
     point_cloud = []

@@ -212,6 +212,27 @@ def bundle_adjust(
     else:
         bounds = None
     
+    # Compute initial reprojection errors
+    initial_residuals = bundle_adjustment_residuals(
+        params, n_cameras, n_points, camera_indices, point_indices, points_2d, K
+    )
+    initial_rmse = np.sqrt(np.mean(initial_residuals**2))
+    initial_errors = initial_residuals.reshape(-1, 2)
+    initial_errors_per_obs = np.linalg.norm(initial_errors, axis=1)
+    
+    print(f"    Initial reprojection error:")
+    print(f"      RMSE: {initial_rmse:.4f} pixels")
+    print(f"      Mean: {np.mean(initial_errors_per_obs):.4f} pixels")
+    print(f"      Median: {np.median(initial_errors_per_obs):.4f} pixels")
+    print(f"      Max: {np.max(initial_errors_per_obs):.4f} pixels")
+    print(f"      Min: {np.min(initial_errors_per_obs):.4f} pixels")
+    print(f"      Std: {np.std(initial_errors_per_obs):.4f} pixels")
+    
+    # Store initial poses for comparison
+    initial_poses = {}
+    for img_name, (R, t) in camera_poses.items():
+        initial_poses[img_name] = (R.copy(), t.copy())
+    
     # Optimize
     try:
         # For now, skip bundle adjustment if we have too few observations
@@ -219,13 +240,16 @@ def bundle_adjust(
         if len(observations) < 20:
             return camera_poses, points_3d, {'status': 'skipped', 'reason': 'insufficient_observations'}
         
+        print(f"    Running optimization (max {max_iterations} iterations)...")
+        print(f"    Iteration progress:")
+        
         result = least_squares(
             bundle_adjustment_residuals,
             params,
             args=(n_cameras, n_points, camera_indices, point_indices, points_2d, K),
             bounds=bounds if fix_cameras and bounds is not None else None,
             max_nfev=max_iterations * len(params),
-            verbose=0
+            verbose=2  # Show detailed iteration output
         )
         
         # Extract refined parameters
@@ -248,16 +272,93 @@ def bundle_adjust(
         
         # Compute final reprojection errors
         final_residuals = result.fun
-        rmse = np.sqrt(np.mean(final_residuals**2))
+        final_rmse = np.sqrt(np.mean(final_residuals**2))
+        final_errors = final_residuals.reshape(-1, 2)
+        final_errors_per_obs = np.linalg.norm(final_errors, axis=1)
+        
+        print(f"\n    Final reprojection error:")
+        print(f"      RMSE: {final_rmse:.4f} pixels")
+        print(f"      Mean: {np.mean(final_errors_per_obs):.4f} pixels")
+        print(f"      Median: {np.median(final_errors_per_obs):.4f} pixels")
+        print(f"      Max: {np.max(final_errors_per_obs):.4f} pixels")
+        print(f"      Min: {np.min(final_errors_per_obs):.4f} pixels")
+        print(f"      Std: {np.std(final_errors_per_obs):.4f} pixels")
+        print(f"    Improvement: {initial_rmse - final_rmse:.4f} pixels ({100 * (initial_rmse - final_rmse) / initial_rmse:.2f}% reduction)")
+        
+        # Compare poses before and after
+        print(f"\n    Camera pose changes:")
+        rotation_changes = []
+        translation_changes = []
+        
+        for img_name in camera_poses.keys():
+            R_initial, t_initial = initial_poses[img_name]
+            R_final, t_final = refined_poses[img_name]
+            
+            # Compute rotation change (angle between rotation matrices)
+            R_diff = R_final @ R_initial.T
+            trace = np.trace(R_diff)
+            angle_change = np.arccos(np.clip((trace - 1) / 2, -1, 1))
+            rotation_changes.append(np.degrees(angle_change))
+            
+            # Compute translation change
+            t_change = np.linalg.norm(t_final - t_initial)
+            translation_changes.append(t_change)
+        
+        if rotation_changes:
+            print(f"      Rotation changes:")
+            print(f"        Mean: {np.mean(rotation_changes):.4f} degrees")
+            print(f"        Max: {np.max(rotation_changes):.4f} degrees")
+            print(f"        Median: {np.median(rotation_changes):.4f} degrees")
+        
+        if translation_changes:
+            print(f"      Translation changes:")
+            print(f"        Mean: {np.mean(translation_changes):.4f} meters")
+            print(f"        Max: {np.max(translation_changes):.4f} meters")
+            print(f"        Median: {np.median(translation_changes):.4f} meters")
+        
+        # Compute point changes
+        point_changes = np.linalg.norm(refined_points - points_3d, axis=1)
+        print(f"    Point 3D changes:")
+        print(f"      Mean: {np.mean(point_changes):.4f} meters")
+        print(f"      Max: {np.max(point_changes):.4f} meters")
+        print(f"      Median: {np.median(point_changes):.4f} meters")
         
         stats = {
             'status': 'success',
-            'initial_cost': np.sqrt(np.mean(bundle_adjustment_residuals(
-                params, n_cameras, n_points, camera_indices, point_indices, points_2d, K
-            )**2)),
-            'final_cost': rmse,
-            'iterations': result.nfev // len(params),
-            'n_observations': len(observations)
+            'initial_rmse': initial_rmse,
+            'initial_mean_error': float(np.mean(initial_errors_per_obs)),
+            'initial_median_error': float(np.median(initial_errors_per_obs)),
+            'initial_max_error': float(np.max(initial_errors_per_obs)),
+            'initial_std_error': float(np.std(initial_errors_per_obs)),
+            'final_rmse': final_rmse,
+            'final_mean_error': float(np.mean(final_errors_per_obs)),
+            'final_median_error': float(np.median(final_errors_per_obs)),
+            'final_max_error': float(np.max(final_errors_per_obs)),
+            'final_std_error': float(np.std(final_errors_per_obs)),
+            'improvement_rmse': float(initial_rmse - final_rmse),
+            'improvement_percent': float(100 * (initial_rmse - final_rmse) / initial_rmse),
+            'iterations': result.nfev,
+            'function_evaluations': result.nfev,
+            'n_observations': len(observations),
+            'n_cameras': n_cameras,
+            'n_points': n_points,
+            'rotation_changes_deg': {
+                'mean': float(np.mean(rotation_changes)) if rotation_changes else 0.0,
+                'max': float(np.max(rotation_changes)) if rotation_changes else 0.0,
+                'median': float(np.median(rotation_changes)) if rotation_changes else 0.0
+            },
+            'translation_changes_m': {
+                'mean': float(np.mean(translation_changes)) if translation_changes else 0.0,
+                'max': float(np.max(translation_changes)) if translation_changes else 0.0,
+                'median': float(np.median(translation_changes)) if translation_changes else 0.0
+            },
+            'point_changes_m': {
+                'mean': float(np.mean(point_changes)),
+                'max': float(np.max(point_changes)),
+                'median': float(np.median(point_changes))
+            },
+            'optimization_status': result.status,
+            'optimization_message': result.message
         }
         
         return refined_poses, refined_points, stats

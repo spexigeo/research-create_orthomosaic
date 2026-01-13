@@ -33,8 +33,10 @@ if not FOOTPRINT_AVAILABLE:
     print("Warning: Footprint class not available. Using fallback footprint calculation.")
     
     def compute_footprint_simple(gps, dji_orientation, focal_length_mm, sensor_width_mm, sensor_height_mm, origin_lat, origin_lon):
-        """Simple footprint calculation without Footprint class."""
+        """Simple footprint calculation without Footprint class - handles oblique angles."""
         from shapely.geometry import Polygon
+        import numpy as np
+        
         # Calculate FOV
         fov_h = calculate_fov_from_focal_length(focal_length_mm, sensor_width_mm)
         fov_v = calculate_fov_from_focal_length(focal_length_mm, sensor_height_mm)
@@ -46,14 +48,10 @@ if not FOOTPRINT_AVAILABLE:
         
         # Get orientation
         roll = dji_orientation.get('gimbal_roll', 0.0)
-        pitch = dji_orientation.get('gimbal_pitch', -90.0)
+        pitch = dji_orientation.get('gimbal_pitch', -90.0)  # -90 = nadir, -60 = 30° oblique, -30 = 60° oblique
         yaw = dji_orientation.get('gimbal_yaw', 0.0)
         if abs(yaw) < 0.1:
             yaw = dji_orientation.get('flight_yaw', 0.0)
-        
-        # Simple footprint calculation: project image corners to ground
-        ground_width = 2 * altitude * math.tan(math.radians(fov_h / 2))
-        ground_height = 2 * altitude * math.tan(math.radians(fov_v / 2))
         
         # Convert to local meters
         lat_diff = latitude - origin_lat
@@ -61,24 +59,144 @@ if not FOOTPRINT_AVAILABLE:
         x_center = lon_diff * 111000.0 * math.cos(math.radians(origin_lat))
         y_center = lat_diff * 111000.0
         
-        # Create a simple rectangle (will be rotated by yaw)
-        corners = [
-            [-ground_width/2, -ground_height/2],
-            [ground_width/2, -ground_height/2],
-            [ground_width/2, ground_height/2],
-            [-ground_width/2, ground_height/2]
+        # For nadir cameras (pitch ≈ -90°), use simple rectangle calculation
+        # For oblique cameras, project corners to ground plane
+        if abs(pitch + 90.0) < 1.0:  # Within 1° of nadir
+            ground_width = 2 * altitude * math.tan(math.radians(fov_h / 2))
+            ground_height = 2 * altitude * math.tan(math.radians(fov_v / 2))
+            corners = [
+                [-ground_width/2, -ground_height/2],
+                [ground_width/2, -ground_height/2],
+                [ground_width/2, ground_height/2],
+                [-ground_width/2, ground_height/2]
+            ]
+            cos_yaw = math.cos(math.radians(yaw))
+            sin_yaw = math.sin(math.radians(yaw))
+            rotated_corners = []
+            for corner in corners:
+                x_rot = corner[0] * cos_yaw - corner[1] * sin_yaw
+                y_rot = corner[0] * sin_yaw + corner[1] * cos_yaw
+                rotated_corners.append([x_center + x_rot, y_center + y_rot])
+            return Polygon(rotated_corners)
+        
+        # For oblique angles, we need to project image corners to ground plane
+        # Image corners in camera frame (normalized)
+        # Assuming image is centered at origin, corners are at ±fov_h/2 and ±fov_v/2
+        half_fov_h = math.radians(fov_h / 2)
+        half_fov_v = math.radians(fov_v / 2)
+        
+        # Image corners in camera frame (normalized directions)
+        # Camera frame: X right, Y down, Z forward
+        corners_cam = [
+            [-math.tan(half_fov_h), -math.tan(half_fov_v), 1.0],  # Top-left
+            [math.tan(half_fov_h), -math.tan(half_fov_v), 1.0],   # Top-right
+            [math.tan(half_fov_h), math.tan(half_fov_v), 1.0],    # Bottom-right
+            [-math.tan(half_fov_h), math.tan(half_fov_v), 1.0]   # Bottom-left
         ]
         
-        # Rotate by yaw
+        # Normalize corner directions
+        corners_cam = [np.array(c) / np.linalg.norm(c) for c in corners_cam]
+        
+        # Build rotation matrix from Euler angles (ZYX order: yaw, pitch, roll)
+        # Note: pitch is negative for downward-looking cameras
         cos_yaw = math.cos(math.radians(yaw))
         sin_yaw = math.sin(math.radians(yaw))
-        rotated_corners = []
-        for corner in corners:
-            x_rot = corner[0] * cos_yaw - corner[1] * sin_yaw
-            y_rot = corner[0] * sin_yaw + corner[1] * cos_yaw
-            rotated_corners.append([x_center + x_rot, y_center + y_rot])
+        cos_pitch = math.cos(math.radians(pitch))
+        sin_pitch = math.sin(math.radians(pitch))
+        cos_roll = math.cos(math.radians(roll))
+        sin_roll = math.sin(math.radians(roll))
         
-        return Polygon(rotated_corners)
+        # Rotation matrix (world to camera)
+        R_yaw = np.array([
+            [cos_yaw, -sin_yaw, 0],
+            [sin_yaw, cos_yaw, 0],
+            [0, 0, 1]
+        ])
+        R_pitch = np.array([
+            [cos_pitch, 0, sin_pitch],
+            [0, 1, 0],
+            [-sin_pitch, 0, cos_pitch]
+        ])
+        R_roll = np.array([
+            [1, 0, 0],
+            [0, cos_roll, -sin_roll],
+            [0, sin_roll, cos_roll]
+        ])
+        R = R_roll @ R_pitch @ R_yaw
+        
+        # Camera position in world frame (at altitude)
+        camera_pos = np.array([x_center, y_center, altitude])
+        
+        # Project corners to ground plane (z = 0)
+        corners_ground = []
+        for corner_dir_cam in corners_cam:
+            # Transform to world frame
+            corner_dir_world = R.T @ corner_dir_cam
+            
+            # Ensure direction points downward (toward ground)
+            if corner_dir_world[2] > 0:
+                corner_dir_world = -corner_dir_world
+            
+            # Intersect ray with ground plane
+            # Ray: P(t) = camera_pos + t * corner_dir_world
+            # Ground: z = 0
+            # After ensuring direction points downward, Z should be negative
+            # so t = -camera_pos[2] / corner_dir_world[2] should be positive
+            
+            if abs(corner_dir_world[2]) < 1e-6:
+                # Ray parallel to ground - this shouldn't happen for downward-looking cameras
+                # but if it does, project to a large distance
+                t = 1000.0
+                intersection = camera_pos + t * corner_dir_world
+                corners_ground.append([intersection[0], intersection[1]])
+            else:
+                t = -camera_pos[2] / corner_dir_world[2]
+                # After negation to ensure downward direction, t should be positive
+                # Use a very small threshold to avoid skipping valid corners due to numerical precision
+                if t < 0:
+                    # Ray points away from ground - this shouldn't happen after negation
+                    # but if it does due to numerical precision, use a small positive value
+                    t = 0.1
+                
+                intersection = camera_pos + t * corner_dir_world
+                corners_ground.append([intersection[0], intersection[1]])
+        
+        # Ensure we have exactly 4 corners for oblique cameras
+        # If we got fewer than 4, something went wrong - complete it
+        if len(corners_ground) == 4:
+            return Polygon(corners_ground)
+        elif len(corners_ground) == 3:
+            # If we only got 3 corners, complete the trapezoid
+            # For a trapezoid, the 4th corner should be the mirror of one of the existing corners
+            # Use the pattern: if we have corners [A, B, C], add D such that A-B-C-D forms a trapezoid
+            p1, p2, p3 = corners_ground
+            # Create 4th corner by completing the quadrilateral
+            # Vector from p1 to p3, add to p2
+            v13 = np.array(p3) - np.array(p1)
+            p4 = np.array(p2) + v13
+            corners_ground.append(p4.tolist())
+            return Polygon(corners_ground)
+        elif len(corners_ground) < 3:
+            # Fallback to simple rectangle if projection completely fails
+            ground_width = 2 * altitude * math.tan(half_fov_h)
+            ground_height = 2 * altitude * math.tan(half_fov_v)
+            corners = [
+                [-ground_width/2, -ground_height/2],
+                [ground_width/2, -ground_height/2],
+                [ground_width/2, ground_height/2],
+                [-ground_width/2, ground_height/2]
+            ]
+            cos_yaw = math.cos(math.radians(yaw))
+            sin_yaw = math.sin(math.radians(yaw))
+            rotated_corners = []
+            for corner in corners:
+                x_rot = corner[0] * cos_yaw - corner[1] * sin_yaw
+                y_rot = corner[0] * sin_yaw + corner[1] * cos_yaw
+                rotated_corners.append([x_center + x_rot, y_center + y_rot])
+            return Polygon(rotated_corners)
+        else:
+            # More than 4 corners - take first 4
+            return Polygon(corners_ground[:4])
 
 try:
     from shapely.geometry import Polygon
@@ -107,6 +225,53 @@ def get_image_dimensions(image_path: str) -> Tuple[int, int]:
         return img.size[0], img.size[1]  # (width, height)
     except Exception as e:
         raise ValueError(f"Could not read image dimensions from {image_path}: {e}")
+
+
+def create_downsampled_images(source_images: List[Path], target_dir: Path, scale_factor: float) -> List[str]:
+    """
+    Create downsampled versions of specified images and save to target_dir.
+    
+    Args:
+        source_images: List of Path objects to source images
+        target_dir: Directory to save downsampled images
+        scale_factor: Scale factor (e.g., 0.25 for quarter resolution)
+        
+    Returns:
+        List of paths to downsampled images
+    """
+    from tqdm import tqdm
+    import cv2
+    
+    target_dir.mkdir(parents=True, exist_ok=True)
+    
+    if not source_images:
+        raise ValueError("No source images provided")
+    
+    print(f"   Creating downsampled images (scale: {scale_factor})...")
+    downsampled_images = []
+    
+    for img_path in tqdm(source_images, desc="Downsampling images"):
+        # Read image
+        img = cv2.imread(str(img_path))
+        if img is None:
+            print(f"   Warning: Could not read {img_path}")
+            continue
+        
+        # Calculate new dimensions
+        height, width = img.shape[:2]
+        new_width = int(width * scale_factor)
+        new_height = int(height * scale_factor)
+        
+        # Resize image
+        img_resized = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_AREA)
+        
+        # Save to target directory
+        target_path = target_dir / img_path.name
+        cv2.imwrite(str(target_path), img_resized)
+        downsampled_images.append(str(target_path))
+    
+    print(f"   Created {len(downsampled_images)} downsampled images in {target_dir}")
+    return downsampled_images
 
 
 def calculate_fov_from_focal_length(focal_length_mm: float, sensor_dimension_mm: float) -> float:
@@ -169,14 +334,16 @@ def compute_footprint_polygon(
         # Convert lat/lon to local meters
         corners_2d = []
         for lon, lat in polygon_coords:
-            if len(corners_2d) < 4:
-                lat_diff = lat - origin_lat
-                lon_diff = lon - origin_lon
-                
-                x = lon_diff * 111000.0 * math.cos(math.radians(origin_lat))
-                y = lat_diff * 111000.0
-                
-                corners_2d.append([x, y])
+            lat_diff = lat - origin_lat
+            lon_diff = lon - origin_lon
+            
+            x = lon_diff * 111000.0 * math.cos(math.radians(origin_lat))
+            y = lat_diff * 111000.0
+            
+            corners_2d.append([x, y])
+            # Only take first 4 corners (some footprints may have more)
+            if len(corners_2d) >= 4:
+                break
     else:
         # Use simple footprint calculation
         footprint_poly = compute_footprint_simple(
@@ -188,9 +355,22 @@ def compute_footprint_polygon(
         corners_2d = list(footprint_poly.exterior.coords[:-1])  # Exclude closing point
     
     # Ensure we have exactly 4 corners
-    if len(corners_2d) >= 4:
+    if len(corners_2d) == 4:
+        corners_array = np.array(corners_2d)
+    elif len(corners_2d) == 3:
+        # Complete 3 corners to 4 by creating a proper trapezoid
+        p1, p2, p3 = corners_2d
+        # Create 4th corner to complete the quadrilateral
+        # Vector from p1 to p3, add to p2
+        v13 = np.array(p3) - np.array(p1)
+        p4 = np.array(p2) + v13
+        corners_2d.append(p4.tolist())
+        corners_array = np.array(corners_2d)
+    elif len(corners_2d) > 4:
+        # Take first 4 corners
         corners_array = np.array(corners_2d[:4])
     elif len(corners_2d) > 0:
+        # Less than 3 corners - duplicate to make 4
         while len(corners_2d) < 4:
             corners_2d.append(corners_2d[-1])
         corners_array = np.array(corners_2d[:4])

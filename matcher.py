@@ -73,10 +73,31 @@ def load_footprint_overlaps(overlaps_file: str = "outputs/footprint_overlaps.jso
         return {}
 
 
-def main(min_overlap_threshold: float = 50.0, enable_epipolar_filtering: bool = True):
-    # Paths
-    image_dir = Path("/Users/mauriciohessflores/Documents/Code/MyCode/research-qualicum_beach_gcp_analysis/input/images")
-    output_dir = Path("outputs")
+def main(min_overlap_threshold: float = 50.0, enable_epipolar_filtering: bool = True, mode: str = 'ortho', resolution: float = 1.0):
+    """
+    Main matching pipeline.
+    
+    Args:
+        min_overlap_threshold: Minimum footprint overlap percentage (default: 50.0)
+        enable_epipolar_filtering: Whether to enable epipolar filtering (default: True)
+        mode: Processing mode - 'ortho' for nadir-only or 'hybrid' for nadir+oblique (default: 'ortho')
+        resolution: Image resolution scale factor (default: 1.0 for full resolution). 
+                    Use 0.125, 0.25, or 0.5 for downsampled versions.
+    """
+    # Paths based on mode
+    if mode == 'hybrid':
+        image_dir = Path("/Users/mauriciohessflores/Documents/Code/Data/hybrid_flight_plan/images")
+        output_dir = Path("outputs_hybrid")
+        print("=" * 60)
+        print("Tiepoint Matcher - Hybrid Mode (Nadir + Oblique)")
+        print("=" * 60)
+    else:  # ortho mode
+        image_dir = Path("/Users/mauriciohessflores/Documents/Code/MyCode/research-qualicum_beach_gcp_analysis/input/images")
+        output_dir = Path("outputs")
+        print("=" * 60)
+        print("Tiepoint Matcher Test - Qualicum Beach Data (Ortho Mode)")
+        print("=" * 60)
+    
     output_dir.mkdir(exist_ok=True)
     
     print("=" * 60)
@@ -193,32 +214,120 @@ def main(min_overlap_threshold: float = 50.0, enable_epipolar_filtering: bool = 
     else:
         print(f"   Footprint overlaps file already exists: {footprint_overlaps_file}")
     
-    # Step 3.7: Use existing quarter-resolution images from inputs/
-    print("\n3.7. Using quarter-resolution images from inputs/quarter_resolution_images...")
-    quarter_res_dir = Path("inputs/quarter_resolution_images")
+    # Step 3.6.5: Visualize camera poses and footprints
+    print("\n3.6.5. Creating camera pose and footprint visualizations...")
+    from matcher.visualization import visualize_camera_poses, visualize_footprints_2d
     
-    if not quarter_res_dir.exists():
-        raise FileNotFoundError(f"Quarter-resolution images directory not found: {quarter_res_dir}")
+    # Create visualization directory
+    viz_dir = output_dir / "visualization"
+    viz_dir.mkdir(parents=True, exist_ok=True)
     
-    # Map original images to quarter-resolution images
-    quarter_res_images = []
-    for img_path in cell_images:
-        img_name = Path(img_path).name
-        quarter_res_path = quarter_res_dir / f"quarter_{img_name}"
-        if quarter_res_path.exists():
-            quarter_res_images.append(str(quarter_res_path))
+    # Visualize camera poses
+    camera_poses_viz = viz_dir / "camera_poses.png"
+    visualize_camera_poses(
+        poses_file=str(camera_poses_file),
+        output_file=str(camera_poses_viz)
+    )
+    
+    # Visualize all footprints
+    footprints_viz = viz_dir / "footprints_2d.png"
+    visualize_footprints_2d(
+        camera_poses_file=str(camera_poses_file),
+        output_file=str(footprints_viz),
+        focal_length_mm=8.8,
+        sensor_width_mm=13.2,
+        sensor_height_mm=9.9,
+        show_image_numbers=True,
+        alpha=0.3
+    )
+    
+    # Visualize nadir footprints only (rectangular)
+    footprints_nadir_viz = viz_dir / "footprints_2d_nadir.png"
+    visualize_footprints_2d(
+        camera_poses_file=str(camera_poses_file),
+        output_file=str(footprints_nadir_viz),
+        focal_length_mm=8.8,
+        sensor_width_mm=13.2,
+        sensor_height_mm=9.9,
+        show_image_numbers=True,
+        alpha=0.3,
+        filter_pitch=-90.0,
+        filter_pitch_tolerance=1.0
+    )
+    
+    # Visualize oblique footprints only (trapezoidal)
+    footprints_oblique_viz = viz_dir / "footprints_2d_oblique.png"
+    visualize_footprints_2d(
+        camera_poses_file=str(camera_poses_file),
+        output_file=str(footprints_oblique_viz),
+        focal_length_mm=8.8,
+        sensor_width_mm=13.2,
+        sensor_height_mm=9.9,
+        show_image_numbers=True,
+        alpha=0.3,
+        filter_oblique_only=True,
+        filter_pitch_tolerance=1.0
+    )
+    
+    # Step 3.7: Prepare images at requested resolution
+    print(f"\n3.7. Preparing images at resolution scale {resolution}...")
+    from matcher.utils import get_image_dimensions, create_downsampled_images
+    
+    if resolution == 1.0:
+        # Full resolution: use images directly
+        print("   Using full-resolution images")
+        processed_images_dir = image_dir
+        processed_images = [str(img_path) for img_path in cell_images]
+    else:
+        # Downsampled: create or use existing downsampled images
+        resolution_str = str(resolution).replace('.', '_')  # e.g., 0.25 -> 0_25
+        processed_images_dir = Path("inputs") / f"images_{resolution_str}"
+        
+        if processed_images_dir.exists() and any(processed_images_dir.glob('*.jpg')):
+            print(f"   Using existing downsampled images in {processed_images_dir}")
+            # Map original images to downsampled images
+            processed_images = []
+            for img_path in cell_images:
+                img_name = Path(img_path).name
+                downsampled_path = processed_images_dir / img_name
+                if downsampled_path.exists():
+                    processed_images.append(str(downsampled_path))
+                else:
+                    print(f"   Warning: Downsampled image not found: {downsampled_path}")
         else:
-            print(f"   Warning: Quarter-resolution image not found: {quarter_res_path}")
+            print(f"   Creating downsampled images in {processed_images_dir}...")
+            processed_images = create_downsampled_images(cell_images, processed_images_dir, resolution)
     
-    print(f"   Found {len(quarter_res_images)} quarter-resolution images")
+    print(f"   Found {len(processed_images)} images at resolution {resolution}")
     
     # Read actual image dimensions from the first image
-    from matcher.utils import get_image_dimensions
-    if quarter_res_images:
-        quarter_res_width, quarter_res_height = get_image_dimensions(quarter_res_images[0])
-        print(f"   Image dimensions (read from images): {quarter_res_width}x{quarter_res_height}")
+    if processed_images:
+        processed_width, processed_height = get_image_dimensions(processed_images[0])
+        print(f"   Image dimensions (read from images): {processed_width}x{processed_height}")
     else:
-        raise ValueError("No quarter-resolution images found to read dimensions from")
+        raise ValueError("No images found to read dimensions from")
+    
+    # Use processed_width/height for all subsequent operations
+    quarter_res_width = processed_width
+    quarter_res_height = processed_height
+    quarter_res_images = processed_images
+    quarter_res_dir = processed_images_dir
+    
+    # Export camera poses to 3D PLY (red dots for positions, blue arrows for orientations)
+    print("\n3.7.5. Exporting camera poses to 3D PLY...")
+    from matcher.cameras import export_camera_poses_to_ply
+    
+    camera_poses_ply = output_dir / "camera_poses_3d.ply"
+    export_camera_poses_to_ply(
+        camera_poses_file=str(camera_poses_file),
+        output_file=str(camera_poses_ply),
+        image_width=processed_width,
+        image_height=processed_height,
+        sphere_radius=5.0,
+        arrow_length=20.0,
+        draw_footprints=False  # Don't draw footprints in 3D PLY, just cameras
+    )
+    print(f"   Saved camera poses 3D PLY to: {camera_poses_ply}")
     
     # Step 4: Initialize matcher
     print("\n4. Initializing LightGlue matcher...")
@@ -257,7 +366,6 @@ def main(min_overlap_threshold: float = 50.0, enable_epipolar_filtering: bool = 
                 print("   All images found in cache, using cached features")
                 # Filter cached features to top N based on scores (if needed)
                 print(f"   Filtering cached features to top {max_features} per image...")
-                import numpy as np
                 filtered_features = {}
                 for img_path, feat_data in cached_features.items():
                     keypoints = np.array(feat_data['keypoints'])
@@ -623,7 +731,52 @@ def main(min_overlap_threshold: float = 50.0, enable_epipolar_filtering: bool = 
         str(metashape_output),
         image_base_path=str(image_dir)
     )
-    print(f"   Exported to: {metashape_output}")
+    print(f"   Exported unfiltered tiepoints to: {metashape_output}")
+    
+    # Also export filtered matches and tracks to MetaShape if available
+    if enable_epipolar_filtering and matches_output_filtered and matches_output_filtered.exists():
+        print("   Exporting filtered matches and tracks to MetaShape format...")
+        # Create filtered match_results structure
+        with open(matches_output_filtered, 'r') as f:
+            filtered_matches_data = json.load(f)
+        
+        # Convert filtered matches to match_results format
+        filtered_match_results = {
+            'features': match_results['features'],  # Same features
+            'matches': []
+        }
+        
+        # Convert filtered matches to the format expected by export_to_metashape
+        for match_dict in filtered_matches_data:
+            img0_name = match_dict['image0']
+            img1_name = match_dict['image1']
+            
+            # Find full paths in features
+            img0_path = None
+            img1_path = None
+            for feat_path in match_results['features'].keys():
+                feat_name = Path(feat_path).name
+                if feat_name == img0_name or feat_path.endswith(img0_name):
+                    img0_path = feat_path
+                if feat_name == img1_name or feat_path.endswith(img1_name):
+                    img1_path = feat_path
+            
+            if img0_path and img1_path:
+                filtered_match_results['matches'].append({
+                    'image0': img0_path,
+                    'image1': img1_path,
+                    'matches': np.array(match_dict['matches']),
+                    'num_matches': match_dict['num_matches'],
+                    'match_confidence': match_dict.get('match_confidence', [])
+                })
+        
+        metashape_output_filtered = output_dir / f"tiepoints_filtered_cell_{central_cell}_metashape.json"
+        export_to_metashape(
+            filtered_match_results,
+            str(metashape_output_filtered),
+            image_base_path=str(image_dir)
+        )
+        print(f"   Exported filtered tiepoints to: {metashape_output_filtered}")
     
     # Step 7: Create visualizations
     print("\n7. Creating visualizations...")
@@ -1002,26 +1155,89 @@ def main(min_overlap_threshold: float = 50.0, enable_epipolar_filtering: bool = 
                     matches_for_reconstruction = matches_for_tracks
                     print("   Using unfiltered tracks for point cloud reconstruction")
                 
-                # Use robust reconstruction with bundle adjustment
-                from matcher.robust_reconstruction import robust_reconstruct_with_bundle_adjustment
+                # Use direct triangulation from matches (simpler and more reliable)
+                from matcher.triangulate_from_matches import triangulate_from_matches
                 from matcher.ply_export import export_point_cloud_to_ply
+                from matcher.dji_exif_parser import get_camera_rotation_from_dji_orientation
                 
-                camera_poses_refined, points_3d, point_cloud, pc_stats = robust_reconstruct_with_bundle_adjustment(
-                    tracks_for_reconstruction,
-                    matches_for_reconstruction,
-                    match_results['features'],
-                    camera_poses_dict,
-                    origin_lat,
-                    origin_lon,
-                    image_width=quarter_res_width,
-                    image_height=quarter_res_height,
-                    max_reprojection_error=2.0,
-                    use_bundle_adjustment=True,
-                    filter_outliers=True
+                # Build camera poses as (R, t) tuples
+                # Map camera poses to match the image names used in matches/features
+                camera_poses_rt = {}
+                feature_keys = set(match_results['features'].keys())
+                
+                for img_name, pose_dict in camera_poses_dict.items():
+                    if not pose_dict.get('gps'):
+                        continue
+                    
+                    # Get position
+                    lat = pose_dict['gps']['latitude']
+                    lon = pose_dict['gps']['longitude']
+                    alt = pose_dict['gps']['altitude']
+                    
+                    lat_diff = lat - origin_lat
+                    lon_diff = lon - origin_lon
+                    x = lon_diff * 111000.0 * np.cos(np.radians(origin_lat))
+                    y = lat_diff * 111000.0
+                    z = alt
+                    t = np.array([x, y, z])
+                    
+                    # Get rotation
+                    if pose_dict.get('dji_orientation'):
+                        R = get_camera_rotation_from_dji_orientation(pose_dict['dji_orientation'])
+                    else:
+                        # Default to identity (will be refined by bundle adjustment)
+                        R = np.eye(3, dtype=np.float64)
+                    
+                    # Map to feature key name (try to find matching feature key)
+                    pose_key = None
+                    img_base = Path(img_name).name
+                    for feat_key in feature_keys:
+                        feat_base = Path(feat_key).name
+                        if feat_base == img_base or feat_base.replace('quarter_', '') == img_base:
+                            pose_key = feat_key
+                            break
+                    
+                    # If no match found, use original name
+                    if pose_key is None:
+                        pose_key = img_name
+                    
+                    camera_poses_rt[pose_key] = (R, t)
+                
+                # Estimate camera intrinsics
+                from matcher.robust_reconstruction import estimate_camera_intrinsics
+                K = estimate_camera_intrinsics(
+                    quarter_res_width,
+                    quarter_res_height,
+                    focal_length_mm=8.8,
+                    sensor_width_mm=13.2
                 )
                 
-                print(f"   Reconstructed {len(points_3d)} 3D points from {len(tracks_for_reconstruction)} tracks")
-                print(f"   Bundle adjustment RMSE: {pc_stats.get('bundle_adjustment', {}).get('final_cost', 'N/A')}")
+                # Triangulate directly from matches
+                print("   Triangulating 3D points directly from matches...")
+                points_3d_list, triang_stats = triangulate_from_matches(
+                    matches_for_reconstruction,
+                    match_results['features'],
+                    camera_poses_rt,
+                    K,
+                    max_reprojection_error=2.0
+                )
+                
+                print(f"   Triangulated {len(points_3d_list)} 3D points from {len(matches_for_reconstruction)} match pairs")
+                print(f"   Mean reprojection error: {triang_stats.get('mean_reprojection_error', 0):.3f} pixels")
+                
+                # Convert to point cloud format
+                point_cloud = points_3d_list
+                points_3d = np.array([p['point_3d'] for p in points_3d_list])
+                
+                pc_stats = {
+                    'triangulation': triang_stats,
+                    'num_points': len(points_3d_list)
+                }
+                
+                camera_poses_refined = camera_poses_rt  # No refinement for now
+                
+                print(f"   Reconstructed {len(points_3d)} 3D points from {len(matches_for_reconstruction)} match pairs")
+                print(f"   Mean reprojection error: {pc_stats.get('triangulation', {}).get('mean_reprojection_error', 0):.3f} pixels")
                 
                 # Save point cloud to JSON
                 point_cloud_json = output_dir / f"point_cloud_cell_{central_cell}.json"
@@ -1052,6 +1268,27 @@ def main(min_overlap_threshold: float = 50.0, enable_epipolar_filtering: bool = 
         print(f"   Warning: Camera poses file not found: {poses_file}")
         print("   Run extract_camera_poses.py first to enable point cloud reconstruction")
     
+    # Step 8.6: Export debug files (footprints and camera poses to CSV)
+    print("\n8.6. Exporting debug files...")
+    from matcher.debug_export import export_footprints_to_csv, export_camera_poses_to_csv
+    
+    footprints_csv = output_dir / f"footprints_cell_{central_cell}.csv"
+    export_footprints_to_csv(
+        camera_poses_file=str(camera_poses_file),
+        output_csv=str(footprints_csv),
+        focal_length_mm=focal_length_mm,
+        sensor_width_mm=sensor_width_mm,
+        sensor_height_mm=sensor_height_mm
+    )
+    print(f"   Exported footprints to: {footprints_csv}")
+    
+    camera_poses_csv = output_dir / f"camera_poses_cell_{central_cell}.csv"
+    export_camera_poses_to_csv(
+        camera_poses_file=str(camera_poses_file),
+        output_csv=str(camera_poses_csv)
+    )
+    print(f"   Exported camera poses to: {camera_poses_csv}")
+    
     # Step 9: Performance summary
     print("\n9. Performance Summary:")
     total_time = time.time() - script_start_time
@@ -1076,7 +1313,8 @@ def main(min_overlap_threshold: float = 50.0, enable_epipolar_filtering: bool = 
         'num_tracks': tracks_data['num_tracks'],
         'device': str(matcher.device),
         'max_features_per_image': max_features,
-        'used_quarter_resolution': True
+        'used_quarter_resolution': (resolution < 1.0),
+        'resolution': resolution
     }
     with open(perf_output, 'w') as f:
         json.dump(perf_data, f, indent=2)
@@ -1106,6 +1344,10 @@ if __name__ == "__main__":
     from datetime import datetime
     
     parser = argparse.ArgumentParser(description='Tiepoint matcher with footprint overlap filtering')
+    parser.add_argument('--mode', type=str, default='ortho', choices=['ortho', 'hybrid'],
+                       help='Processing mode: "ortho" for nadir-only, "hybrid" for nadir+oblique (default: ortho)')
+    parser.add_argument('--resolution', type=float, default=1.0,
+                       help='Image resolution scale factor: 1.0 for full resolution, 0.5 for half, 0.25 for quarter, etc. (default: 1.0)')
     parser.add_argument('--min-overlap', type=float, default=50.0,
                        help='Minimum footprint overlap percentage to consider for matching (default: 50.0)')
     parser.add_argument('--no-epipolar-filtering', action='store_true',
@@ -1113,9 +1355,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     enable_epipolar_filtering = not args.no_epipolar_filtering
+    mode = args.mode
     
-    # Set up output directory for logs
-    output_dir = Path("outputs")
+    # Set up output directory for logs based on mode
+    if mode == 'hybrid':
+        output_dir = Path("outputs_hybrid")
+    else:
+        output_dir = Path("outputs")
     output_dir.mkdir(exist_ok=True)
     log_file = output_dir / "run_log.txt"
     
@@ -1151,7 +1397,7 @@ if __name__ == "__main__":
         sys.stderr = stderr_tee
         
         try:
-            main(min_overlap_threshold=args.min_overlap, enable_epipolar_filtering=enable_epipolar_filtering)
+            main(min_overlap_threshold=args.min_overlap, enable_epipolar_filtering=enable_epipolar_filtering, mode=mode, resolution=args.resolution)
         except Exception as e:
             import traceback
             error_msg = f"\nERROR: {str(e)}\n{traceback.format_exc()}\n"

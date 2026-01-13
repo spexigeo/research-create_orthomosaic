@@ -2,7 +2,13 @@
 Utilities for working with H3 cells and parsing image filenames.
 """
 
-import h3
+try:
+    import h3
+    HAS_H3 = True
+except ImportError:
+    HAS_H3 = False
+    h3 = None
+
 from typing import List, Dict, Tuple, Optional
 from pathlib import Path
 import re
@@ -90,6 +96,10 @@ def find_central_cell(cell_ids: List[str]) -> Optional[str]:
     Returns:
         Cell ID of the central cell, or None if no central cell found
     """
+    if not HAS_H3:
+        # If h3 is not available, just return the first cell
+        return cell_ids[0] if cell_ids else None
+    
     cell_set = set(cell_ids)
     
     for cell_id in cell_ids:
@@ -114,6 +124,10 @@ def get_cell_neighbors(cell_id: str, available_cells: List[str]) -> List[str]:
     Returns:
         List of neighbor cell IDs that are in available_cells
     """
+    if not HAS_H3:
+        # If h3 is not available, return empty list
+        return []
+    
     available_set = set(available_cells)
     all_neighbors = h3.grid_ring(cell_id, k=1)
     return [n for n in all_neighbors if n in available_set]
